@@ -1,0 +1,652 @@
+---
+title: Working with Prompts
+description: 'Complete guide to MCP prompts - templates, arguments, and dynamic generation'
+---
+
+# Working with Prompts
+
+Learn how to create reusable prompt templates that clients can use to interact with LLMs.
+
+## What Are Prompts?
+
+Prompts in MCP are **reusable templates** that generate messages for LLM conversations. They help standardize common workflows and provide structured guidance to AI assistants.
+
+<CardGroup cols={2}>
+  <Card title="Template-Based" icon="file-lines">
+    Define prompts once, use many times
+  </Card>
+  <Card title="Parameterized" icon="sliders">
+    Accept arguments for customization
+  </Card>
+  <Card title="Multi-Message" icon="messages">
+    Support system, user, and assistant messages
+  </Card>
+  <Card title="Dynamic" icon="wand-magic-sparkles">
+    Generate content based on context
+  </Card>
+</CardGroup>
+
+## Prompt vs Tool
+
+| Feature | Prompt | Tool |
+|---------|--------|------|
+| **Purpose** | Generate LLM messages | Execute actions |
+| **Returns** | Message array | Data/results |
+| **Side Effects** | No | Yes |
+| **Use Case** | Guide AI conversation | Perform operations |
+| **Example** | Code review template | Run linter |
+
+## Complete Examples
+
+### 1. Code Review Prompts
+
+A comprehensive code review server with multiple prompt templates:
+
+```rust
+use vulcan::{
+    prompt, prompt_router, prompt_handler,
+    ServerHandler, ErrorData,
+    model::*,
+    handler::server::prompt::PromptRouter,
+};
+
+#[derive(Clone)]
+pub struct CodeReviewServer {
+    prompt_router: PromptRouter<Self>,
+}
+
+#[prompt_router]
+impl CodeReviewServer {
+    fn new() -> Self {
+        Self {
+            prompt_router: Self::prompt_router(),
+        }
+    }
+
+    #[prompt(
+        name = "code-review",
+        description = "Review code for best practices, bugs, and improvements"
+    )]
+    async fn code_review(
+        &self,
+        file_path: String,
+        language: String,
+        focus: Option<String>,
+    ) -> Vec<PromptMessage> {
+        let focus_area = focus.unwrap_or_else(|| "general best practices".to_string());
+
+        vec![
+            PromptMessage::new(
+                PromptMessageRole::System,
+                PromptMessageContent::text(format!(
+                    "You are an expert {} developer and code reviewer. \
+                     Provide constructive feedback focusing on: {}",
+                    language, focus_area
+                ))
+            ),
+            PromptMessage::new(
+                PromptMessageRole::User,
+                PromptMessageContent::text(format!(
+                    "Please review the following {} code from '{}':\n\n\
+                     Focus areas:\n\
+                     - {}\n\
+                     - Code quality and readability\n\
+                     - Potential bugs or edge cases\n\
+                     - Performance considerations\n\
+                     - Security issues\n\n\
+                     Provide specific, actionable feedback.",
+                    language, file_path, focus_area
+                ))
+            ),
+        ]
+    }
+
+    #[prompt(
+        name = "refactor-suggestion",
+        description = "Suggest refactoring improvements for code"
+    )]
+    async fn refactor_suggestion(
+        &self,
+        code_snippet: String,
+        language: String,
+        goal: String,
+    ) -> Vec<PromptMessage> {
+        vec![
+            PromptMessage::new(
+                PromptMessageRole::System,
+                PromptMessageContent::text(
+                    "You are a senior software architect specializing in code refactoring. \
+                     Provide clear, practical refactoring suggestions."
+                )
+            ),
+            PromptMessage::new(
+                PromptMessageRole::User,
+                PromptMessageContent::text(format!(
+                    "Language: {}\nGoal: {}\n\nCode:\n```\n{}\n```\n\n\
+                     Please suggest refactoring improvements to achieve the goal. \
+                     Include before/after code examples.",
+                    language, goal, code_snippet
+                ))
+            ),
+        ]
+    }
+
+    #[prompt(
+        name = "explain-code",
+        description = "Generate explanation of code functionality"
+    )]
+    async fn explain_code(
+        &self,
+        code: String,
+        language: String,
+        detail_level: Option<String>,
+    ) -> Vec<PromptMessage> {
+        let level = detail_level.unwrap_or_else(|| "intermediate".to_string());
+
+        vec![
+            PromptMessage::new(
+                PromptMessageRole::System,
+                PromptMessageContent::text(format!(
+                    "You are a {} educator. Explain code clearly at a {} level.",
+                    language, level
+                ))
+            ),
+            PromptMessage::new(
+                PromptMessageRole::User,
+                PromptMessageContent::text(format!(
+                    "Explain this {} code:\n\n```\n{}\n```\n\n\
+                     Detail level: {}\n\n\
+                     Include:\n\
+                     - What the code does\n\
+                     - How it works\n\
+                     - Key concepts used\n\
+                     - Potential improvements",
+                    language, code, level
+                ))
+            ),
+        ]
+    }
+}
+
+#[prompt_handler]
+impl ServerHandler for CodeReviewServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            capabilities: ServerCapabilities::builder()
+                .enable_prompts()
+                .build(),
+            server_info: Implementation {
+                name: "code-review-prompts".to_string(),
+                version: "1.0.0".to_string(),
+                ..Default::default()
+            },
+            instructions: Some(
+                "Provides code review and explanation prompt templates.".to_string()
+            ),
+        }
+    }
+}
+```
+
+### 2. Data Analysis Prompts
+
+Prompts for analyzing and visualizing data:
+
+```rust
+#[derive(Clone)]
+pub struct DataAnalysisServer {
+    prompt_router: PromptRouter<Self>,
+}
+
+#[prompt_router]
+impl DataAnalysisServer {
+    #[prompt(
+        name = "analyze-dataset",
+        description = "Analyze a dataset and provide insights"
+    )]
+    async fn analyze_dataset(
+        &self,
+        dataset_description: String,
+        questions: Vec<String>,
+        format: Option<String>,
+    ) -> Vec<PromptMessage> {
+        let output_format = format.unwrap_or_else(|| "markdown".to_string());
+        let questions_text = questions
+            .iter()
+            .enumerate()
+            .map(|(i, q)| format!("{}. {}", i + 1, q))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        vec![
+            PromptMessage::new(
+                PromptMessageRole::System,
+                PromptMessageContent::text(
+                    "You are a data analyst. Provide clear, actionable insights \
+                     supported by data. Use statistical reasoning and identify \
+                     patterns, trends, and anomalies."
+                )
+            ),
+            PromptMessage::new(
+                PromptMessageRole::User,
+                PromptMessageContent::text(format!(
+                    "Dataset: {}\n\n\
+                     Questions to answer:\n{}\n\n\
+                     Please analyze the dataset and answer these questions. \
+                     Format: {}\n\n\
+                     Include:\n\
+                     - Statistical summary\n\
+                     - Key findings\n\
+                     - Visualizations (describe)\n\
+                     - Recommendations",
+                    dataset_description, questions_text, output_format
+                ))
+            ),
+        ]
+    }
+
+    #[prompt(
+        name = "sql-query-helper",
+        description = "Help write SQL queries"
+    )]
+    async fn sql_query_helper(
+        &self,
+        task_description: String,
+        schema: String,
+        dialect: Option<String>,
+    ) -> Vec<PromptMessage> {
+        let sql_dialect = dialect.unwrap_or_else(|| "PostgreSQL".to_string());
+
+        vec![
+            PromptMessage::new(
+                PromptMessageRole::System,
+                PromptMessageContent::text(format!(
+                    "You are a {} expert. Write efficient, correct SQL queries \
+                     with proper indexing and optimization.",
+                    sql_dialect
+                ))
+            ),
+            PromptMessage::new(
+                PromptMessageRole::User,
+                PromptMessageContent::text(format!(
+                    "Task: {}\n\n\
+                     Schema:\n```sql\n{}\n```\n\n\
+                     Please provide:\n\
+                     1. The SQL query\n\
+                     2. Explanation of the query\n\
+                     3. Performance considerations\n\
+                     4. Example output",
+                    task_description, schema
+                ))
+            ),
+        ]
+    }
+}
+```
+
+### 3. Writing and Documentation Prompts
+
+```rust
+#[derive(Clone)]
+pub struct WritingServer {
+    prompt_router: PromptRouter<Self>,
+}
+
+#[prompt_router]
+impl WritingServer {
+    #[prompt(
+        name = "technical-documentation",
+        description = "Generate technical documentation"
+    )]
+    async fn technical_documentation(
+        &self,
+        topic: String,
+        audience: String,
+        sections: Vec<String>,
+    ) -> Vec<PromptMessage> {
+        let sections_text = sections.join(", ");
+
+        vec![
+            PromptMessage::new(
+                PromptMessageRole::System,
+                PromptMessageContent::text(format!(
+                    "You are a technical writer creating documentation for {}. \
+                     Use clear language, code examples, and diagrams where helpful.",
+                    audience
+                ))
+            ),
+            PromptMessage::new(
+                PromptMessageRole::User,
+                PromptMessageContent::text(format!(
+                    "Topic: {}\n\
+                     Audience: {}\n\
+                     Required sections: {}\n\n\
+                     Create comprehensive documentation including:\n\
+                     - Overview and purpose\n\
+                     - Step-by-step instructions\n\
+                     - Code examples\n\
+                     - Common issues and solutions\n\
+                     - Best practices",
+                    topic, audience, sections_text
+                ))
+            ),
+        ]
+    }
+
+    #[prompt(
+        name = "api-documentation",
+        description = "Generate API documentation from OpenAPI spec"
+    )]
+    async fn api_documentation(
+        &self,
+        endpoint: String,
+        method: String,
+        spec: String,
+    ) -> Vec<PromptMessage> {
+        vec![
+            PromptMessage::new(
+                PromptMessageRole::System,
+                PromptMessageContent::text(
+                    "You are an API documentation specialist. Create clear, \
+                     comprehensive docs with request/response examples."
+                )
+            ),
+            PromptMessage::new(
+                PromptMessageRole::User,
+                PromptMessageContent::text(format!(
+                    "Endpoint: {} {}\n\n\
+                     OpenAPI Spec:\n```yaml\n{}\n```\n\n\
+                     Generate documentation including:\n\
+                     - Description\n\
+                     - Parameters\n\
+                     - Request examples\n\
+                     - Response examples\n\
+                     - Error codes",
+                    method, endpoint, spec
+                ))
+            ),
+        ]
+    }
+}
+```
+
+## Dynamic Prompts
+
+Generate prompts based on runtime data:
+
+```rust
+#[prompt(name = "context-aware-review")]
+async fn context_aware_review(
+    &self,
+    file_path: String,
+) -> Vec<PromptMessage> {
+    // Read file to determine context
+    let code = tokio::fs::read_to_string(&file_path).await
+        .unwrap_or_else(|_| "Unable to read file".to_string());
+
+    // Detect language from extension
+    let language = file_path
+        .split('.')
+        .last()
+        .map(|ext| match ext {
+            "rs" => "Rust",
+            "py" => "Python",
+            "js" => "JavaScript",
+            "go" => "Go",
+            _ => "Unknown",
+        })
+        .unwrap_or("Unknown");
+
+    // Analyze code complexity
+    let lines = code.lines().count();
+    let complexity_note = if lines > 500 {
+        "This is a large file. Focus on architecture and module structure."
+    } else if lines > 100 {
+        "Review for code organization and function complexity."
+    } else {
+        "Provide detailed line-by-line feedback."
+    };
+
+    vec![
+        PromptMessage::new(
+            PromptMessageRole::System,
+            PromptMessageContent::text(format!(
+                "You are reviewing {} code. {}",
+                language, complexity_note
+            ))
+        ),
+        PromptMessage::new(
+            PromptMessageRole::User,
+            PromptMessageContent::text(format!(
+                "File: {}\nLanguage: {}\nLines: {}\n\n```\n{}\n```",
+                file_path, language, lines, code
+            ))
+        ),
+    ]
+}
+```
+
+## Multi-Message Conversations
+
+Create prompts with conversation history:
+
+```rust
+#[prompt(name = "iterative-design")]
+async fn iterative_design(
+    &self,
+    requirement: String,
+    previous_attempts: Option<Vec<String>>,
+) -> Vec<PromptMessage> {
+    let mut messages = vec![
+        PromptMessage::new(
+            PromptMessageRole::System,
+            PromptMessageContent::text(
+                "You are a software architect. Help iterate on designs \
+                 based on feedback and previous attempts."
+            )
+        ),
+    ];
+
+    // Add conversation history if exists
+    if let Some(attempts) = previous_attempts {
+        for (i, attempt) in attempts.iter().enumerate() {
+            messages.push(PromptMessage::new(
+                PromptMessageRole::User,
+                PromptMessageContent::text(format!("Attempt {}: {}", i + 1, attempt))
+            ));
+            messages.push(PromptMessage::new(
+                PromptMessageRole::Assistant,
+                PromptMessageContent::text(
+                    "I've reviewed this design. Here's my feedback..."
+                )
+            ));
+        }
+    }
+
+    // Add current request
+    messages.push(PromptMessage::new(
+        PromptMessageRole::User,
+        PromptMessageContent::text(format!(
+            "Current requirement: {}\n\n\
+             Please provide an improved design considering previous feedback.",
+            requirement
+        ))
+    ));
+
+    messages
+}
+```
+
+## Testing Prompts
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_code_review_prompt() {
+        let server = CodeReviewServer::new();
+
+        let messages = server.code_review(
+            "src/main.rs".to_string(),
+            "Rust".to_string(),
+            Some("error handling".to_string()),
+        ).await;
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, PromptMessageRole::System);
+        assert_eq!(messages[1].role, PromptMessageRole::User);
+
+        // Verify focus area is included
+        let user_content = messages[1].content.as_text().unwrap();
+        assert!(user_content.contains("error handling"));
+    }
+
+    #[tokio::test]
+    async fn test_prompt_with_defaults() {
+        let server = CodeReviewServer::new();
+
+        let messages = server.code_review(
+            "app.js".to_string(),
+            "JavaScript".to_string(),
+            None,  // No focus - should use default
+        ).await;
+
+        let user_content = messages[1].content.as_text().unwrap();
+        assert!(user_content.contains("general best practices"));
+    }
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Clear Instructions">
+    Provide specific, actionable instructions:
+
+    ```rust
+    // ✅ Good - specific instructions
+    PromptMessage::new_user(
+        "Review this code for:\n\
+         1. Security vulnerabilities\n\
+         2. Performance issues\n\
+         3. Code style violations\n\
+         Provide line numbers and specific fixes."
+    )
+
+    // ❌ Bad - vague
+    PromptMessage::new_user("Review this code")
+    ```
+  </Accordion>
+
+  <Accordion title="System Messages">
+    Set context and tone with system messages:
+
+    ```rust
+    // ✅ Good - establishes role and style
+    PromptMessage::new_system(
+        "You are an expert Rust developer. Provide concise, \
+         technically accurate explanations with code examples."
+    )
+
+    // ❌ Bad - missing context
+    PromptMessage::new_system("You are helpful")
+    ```
+  </Accordion>
+
+  <Accordion title="Parameterization">
+    Make prompts flexible with arguments:
+
+    ```rust
+    // ✅ Good - parameterized
+    #[prompt]
+    async fn review(
+        &self,
+        language: String,
+        focus: Option<String>,
+        detail_level: Option<String>,
+    ) -> Vec<PromptMessage> { }
+
+    // ❌ Bad - hardcoded
+    #[prompt]
+    async fn review(&self) -> Vec<PromptMessage> {
+        // Always reviews Python at expert level
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Format Consistency">
+    Use consistent formatting:
+
+    ```rust
+    // ✅ Good - clear structure
+    format!(
+        "Language: {}\n\
+         Task: {}\n\
+         Code:\n```\n{}\n```\n\n\
+         Requirements:\n{}",
+        lang, task, code, requirements
+    )
+
+    // ❌ Bad - inconsistent
+    format!("{} {} {}", lang, code, task)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Common Patterns
+
+### Template Composition
+
+Combine multiple prompts:
+
+```rust
+async fn combined_review(&self, file: String) -> Vec<PromptMessage> {
+    let code_review = self.code_review(file.clone(), "Rust".into(), None).await;
+    let explain = self.explain_code(/* ... */).await;
+
+    // Combine both prompts
+    let mut combined = code_review;
+    combined.push(PromptMessage::new_user(
+        "Also explain the code for junior developers:"
+    ));
+    combined.extend(explain);
+
+    combined
+}
+```
+
+### Prompt Variants
+
+Provide multiple versions:
+
+```rust
+#[prompt(name = "review-quick")]
+async fn review_quick(&self, code: String) -> Vec<PromptMessage> {
+    // Quick, surface-level review
+}
+
+#[prompt(name = "review-deep")]
+async fn review_deep(&self, code: String) -> Vec<PromptMessage> {
+    // Comprehensive, detailed review
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Working with Resources" icon="database" href="/guides/working-with-resources">
+    Learn about resources
+  </Card>
+  <Card title="Tools Guide" icon="wrench" href="/concepts/tools">
+    Combine prompts with tools
+  </Card>
+  <Card title="Testing Guide" icon="vial" href="/guides/testing">
+    Test your prompts
+  </Card>
+  <Card title="Building a Server" icon="server" href="/guides/building-server">
+    Build complete servers
+  </Card>
+</CardGroup>

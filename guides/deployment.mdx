@@ -1,0 +1,819 @@
+---
+title: Deployment
+description: 'Deploy your Vulcan MCP servers to production environments'
+---
+
+# Deploying MCP Servers
+
+Learn how to deploy your Vulcan MCP servers for production use with Claude Desktop, web applications, and cloud platforms.
+
+## Deployment Options
+
+<CardGroup cols={2}>
+  <Card title="Claude Desktop" icon="desktop">
+    Local deployment for desktop AI assistant
+  </Card>
+  <Card title="Web Services" icon="globe">
+    HTTP/SSE servers for web applications
+  </Card>
+  <Card title="Cloud Platforms" icon="cloud">
+    Serverless and container deployments
+  </Card>
+  <Card title="Docker" icon="docker">
+    Containerized deployments
+  </Card>
+</CardGroup>
+
+## Claude Desktop Integration
+
+### Building for Release
+
+```bash
+# Build optimized binary
+cargo build --release --features server,transport-io
+
+# Binary location
+# Linux/macOS: target/release/my-mcp-server
+# Windows: target\release\my-mcp-server.exe
+```
+
+### Configuration
+
+Add your server to Claude Desktop's configuration file:
+
+<Tabs>
+  <Tab title="macOS">
+    **Location:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+    ```json
+    {
+      "mcpServers": {
+        "my-server": {
+          "command": "/absolute/path/to/target/release/my-mcp-server"
+        }
+      }
+    }
+    ```
+
+    **With arguments:**
+    ```json
+    {
+      "mcpServers": {
+        "my-server": {
+          "command": "/absolute/path/to/my-mcp-server",
+          "args": ["--config", "/path/to/config.json"],
+          "env": {
+            "API_KEY": "your-api-key",
+            "LOG_LEVEL": "info"
+          }
+        }
+      }
+    }
+    ```
+  </Tab>
+
+  <Tab title="Windows">
+    **Location:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+    ```json
+    {
+      "mcpServers": {
+        "my-server": {
+          "command": "C:\\path\\to\\my-mcp-server.exe"
+        }
+      }
+    }
+    ```
+
+    **Note:** Use double backslashes (`\\`) in Windows paths.
+  </Tab>
+
+  <Tab title="Linux">
+    **Location:** `~/.config/Claude/claude_desktop_config.json`
+
+    ```json
+    {
+      "mcpServers": {
+        "my-server": {
+          "command": "/usr/local/bin/my-mcp-server"
+        }
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+### Installation Script
+
+Create an install script for easy deployment:
+
+```bash install.sh
+#!/bin/bash
+
+set -e
+
+echo "Building Vulcan MCP Server..."
+cargo build --release
+
+echo "Installing to /usr/local/bin..."
+sudo cp target/release/my-mcp-server /usr/local/bin/
+
+echo "Configuring Claude Desktop..."
+CLAUDE_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+
+# Create config directory if it doesn't exist
+mkdir -p "$(dirname "$CLAUDE_CONFIG")"
+
+# Add server to config (simplified - use jq for robust JSON editing)
+cat > "$CLAUDE_CONFIG" <<EOF
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "/usr/local/bin/my-mcp-server"
+    }
+  }
+}
+EOF
+
+echo "✅ Installation complete!"
+echo "Restart Claude Desktop to use the server."
+```
+
+## Web Deployment (HTTP/SSE)
+
+### HTTP Server with Axum
+
+```rust
+use vulcan::{ServerHandler, transport::StreamableHttpService};
+use axum::{
+    routing::post,
+    Router,
+    http::StatusCode,
+};
+use std::net::SocketAddr;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create MCP server
+    let mcp_server = MyServer::new();
+    let http_service = StreamableHttpService::new(mcp_server, Default::default());
+
+    // Create Axum router
+    let app = Router::new()
+        .route("/mcp", post(|| async {
+            // Handle MCP requests
+            http_service.handle_request(request).await
+        }))
+        .route("/health", get(|| async { StatusCode::OK }));
+
+    // Start server
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    println!("Server running at http://{}", addr);
+
+    axum::Server::bind(&addr)
+        .serve(app.into_make_service())
+        .await?;
+
+    Ok(())
+}
+```
+
+### SSE Server
+
+```rust
+use vulcan::transport::SseServer;
+use axum::{
+    routing::{get, post},
+    Router,
+    extract::State,
+};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mcp_server = Arc::new(MyServer::new());
+    let sse_server = SseServer::new(mcp_server.clone());
+
+    let app = Router::new()
+        .route("/sse", get({
+            let sse_server = sse_server.clone();
+            move |req| sse_server.handle_sse(req)
+        }))
+        .route("/message", post({
+            let sse_server = sse_server.clone();
+            move |req| sse_server.handle_post(req)
+        }));
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    println!("SSE server running at http://{}", addr);
+
+    axum::Server::bind(&addr)
+        .serve(app.into_make_service())
+        .await?;
+
+    Ok(())
+}
+```
+
+## Docker Deployment
+
+### Dockerfile
+
+```dockerfile
+FROM rust:1.75 AS builder
+
+WORKDIR /app
+
+# Copy manifests
+COPY Cargo.toml Cargo.lock ./
+
+# Copy source
+COPY src ./src
+
+# Build release binary
+RUN cargo build --release --features server,transport-io,transport-http
+
+# Runtime image
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy binary from builder
+COPY --from=builder /app/target/release/my-mcp-server /usr/local/bin/
+
+# Expose port (for HTTP servers)
+EXPOSE 8080
+
+# Run server
+CMD ["my-mcp-server"]
+```
+
+### Docker Compose
+
+```yaml docker-compose.yml
+version: '3.8'
+
+services:
+  mcp-server:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - RUST_LOG=info
+      - DATABASE_URL=postgres://user:pass@db:5432/mydb
+    volumes:
+      - ./config:/etc/mcp
+    restart: unless-stopped
+    depends_on:
+      - db
+
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: mydb
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+```
+
+### Multi-Stage Build (Optimized)
+
+```dockerfile
+# Smaller Alpine-based build
+FROM rust:1.75-alpine AS builder
+
+RUN apk add --no-cache musl-dev
+
+WORKDIR /app
+COPY . .
+
+# Build with musl for static linking
+RUN cargo build --release --target x86_64-unknown-linux-musl
+
+# Minimal runtime image
+FROM scratch
+
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/my-mcp-server /
+
+EXPOSE 8080
+ENTRYPOINT ["/my-mcp-server"]
+```
+
+## Cloud Platform Deployment
+
+### AWS Lambda (Serverless)
+
+```rust
+use lambda_http::{run, service_fn, Error, Request, Response};
+use vulcan::transport::StreamableHttpService;
+
+async fn function_handler(event: Request) -> Result<Response<String>, Error> {
+    let mcp_server = MyServer::new();
+    let http_service = StreamableHttpService::new(mcp_server, Default::default());
+
+    // Convert lambda request to MCP request
+    let mcp_response = http_service.handle_lambda(event).await?;
+
+    Ok(mcp_response)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    run(service_fn(function_handler)).await
+}
+```
+
+**Deploy with AWS SAM:**
+
+```yaml template.yaml
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Resources:
+  McpFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: bootstrap
+      Runtime: provided.al2
+      CodeUri: target/lambda/my-mcp-server/
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /mcp
+            Method: POST
+```
+
+### Google Cloud Run
+
+```dockerfile
+# Use Google Cloud Run compatible image
+FROM rust:1.75 AS builder
+
+WORKDIR /app
+COPY . .
+
+RUN cargo build --release
+
+FROM gcr.io/distroless/cc-debian12
+
+COPY --from=builder /app/target/release/my-mcp-server /app
+
+ENV PORT=8080
+CMD ["/app"]
+```
+
+**Deploy:**
+
+```bash
+# Build and push
+gcloud builds submit --tag gcr.io/PROJECT_ID/my-mcp-server
+
+# Deploy to Cloud Run
+gcloud run deploy my-mcp-server \
+  --image gcr.io/PROJECT_ID/my-mcp-server \
+  --platform managed \
+  --region us-central1 \
+  --allow-unauthenticated
+```
+
+### Azure Container Apps
+
+```bash
+# Build and push to Azure Container Registry
+az acr build --registry myregistry \
+  --image my-mcp-server:latest \
+  .
+
+# Deploy to Container Apps
+az containerapp create \
+  --name my-mcp-server \
+  --resource-group mygroup \
+  --image myregistry.azurecr.io/my-mcp-server:latest \
+  --target-port 8080 \
+  --ingress external
+```
+
+## Kubernetes Deployment
+
+### Deployment Manifest
+
+```yaml deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mcp-server
+  template:
+    metadata:
+      labels:
+        app: mcp-server
+    spec:
+      containers:
+      - name: mcp-server
+        image: my-mcp-server:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: RUST_LOG
+          value: info
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: mcp-secrets
+              key: database-url
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server
+spec:
+  selector:
+    app: mcp-server
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+  type: LoadBalancer
+```
+
+## Production Configuration
+
+### Environment Variables
+
+```rust
+use std::env;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load configuration from environment
+    let port = env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse::<u16>()?;
+
+    let log_level = env::var("RUST_LOG")
+        .unwrap_or_else(|_| "info".to_string());
+
+    let database_url = env::var("DATABASE_URL")
+        .expect("DATABASE_URL must be set");
+
+    // Initialize logging
+    tracing_subscriber::fmt()
+        .with_env_filter(log_level)
+        .init();
+
+    // Start server
+    let server = MyServer::new(&database_url).await?;
+    server.serve_on_port(port).await?;
+
+    Ok(())
+}
+```
+
+### Configuration File
+
+```toml config.toml
+[server]
+host = "0.0.0.0"
+port = 8080
+workers = 4
+
+[logging]
+level = "info"
+format = "json"
+
+[database]
+url = "postgres://localhost/mydb"
+max_connections = 10
+
+[features]
+enable_metrics = true
+enable_tracing = true
+```
+
+**Load configuration:**
+
+```rust
+use serde::Deserialize;
+use config::{Config, File};
+
+#[derive(Deserialize)]
+struct AppConfig {
+    server: ServerConfig,
+    logging: LoggingConfig,
+    database: DatabaseConfig,
+}
+
+fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
+    let config = Config::builder()
+        .add_source(File::with_name("config"))
+        .add_source(config::Environment::with_prefix("APP"))
+        .build()?;
+
+    Ok(config.try_deserialize()?)
+}
+```
+
+## Monitoring and Observability
+
+### Metrics with Prometheus
+
+```rust
+use prometheus::{Encoder, TextEncoder, Registry};
+use vulcan::adapters::MetricsMiddleware;
+
+let metrics = MetricsMiddleware::new();
+
+// Expose metrics endpoint
+async fn metrics_handler(metrics: Arc<MetricsMiddleware>) -> String {
+    let registry = Registry::new();
+
+    // Register custom metrics
+    registry.register(Box::new(metrics.invocation_counter())).unwrap();
+    registry.register(Box::new(metrics.error_counter())).unwrap();
+
+    // Encode metrics
+    let mut buffer = vec![];
+    let encoder = TextEncoder::new();
+    let metric_families = registry.gather();
+    encoder.encode(&metric_families, &mut buffer).unwrap();
+
+    String::from_utf8(buffer).unwrap()
+}
+```
+
+### Structured Logging
+
+```rust
+use tracing::{info, error, instrument};
+
+#[instrument(skip(self), fields(tool_name = %tool_name))]
+async fn execute_tool(&self, tool_name: &str) -> Result<ToolResult, ErrorData> {
+    info!("Executing tool");
+
+    match self.call_tool(tool_name).await {
+        Ok(result) => {
+            info!(success = true, "Tool executed successfully");
+            Ok(result)
+        }
+        Err(e) => {
+            error!(error = %e, "Tool execution failed");
+            Err(e)
+        }
+    }
+}
+```
+
+### Health Checks
+
+```rust
+use axum::{routing::get, Json};
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct HealthStatus {
+    status: String,
+    version: String,
+    uptime: u64,
+}
+
+async fn health_check() -> Json<HealthStatus> {
+    Json(HealthStatus {
+        status: "healthy".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime: /* get uptime */,
+    })
+}
+
+let app = Router::new()
+    .route("/health", get(health_check))
+    .route("/ready", get(readiness_check));
+```
+
+## Security Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use HTTPS in Production">
+    Always use TLS for public-facing servers:
+
+    ```rust
+    use axum_server::tls_rustls::RustlsConfig;
+
+    let config = RustlsConfig::from_pem_file(
+        "cert.pem",
+        "key.pem"
+    ).await?;
+
+    axum_server::bind_rustls(addr, config)
+        .serve(app.into_make_service())
+        .await?;
+    ```
+  </Accordion>
+
+  <Accordion title="Implement Authentication">
+    Add authentication middleware:
+
+    ```rust
+    use vulcan::adapters::AuthenticationMiddleware;
+
+    let mut chain = MiddlewareChain::new();
+    chain.add(Arc::new(
+        AuthenticationMiddleware::bearer_token("your-secret-token")
+    ));
+    ```
+  </Accordion>
+
+  <Accordion title="Rate Limiting">
+    Protect against abuse:
+
+    ```rust
+    use tower::limit::RateLimitLayer;
+    use std::time::Duration;
+
+    let app = Router::new()
+        .route("/mcp", post(mcp_handler))
+        .layer(RateLimitLayer::new(100, Duration::from_secs(60)));
+    ```
+  </Accordion>
+
+  <Accordion title="Input Validation">
+    Validate all inputs in tool functions:
+
+    ```rust
+    #[tool(description = "Process data")]
+    async fn process(&self, data: String) -> Result<Output, ErrorData> {
+        // Validate input size
+        if data.len() > 1_000_000 {
+            return Err(ErrorData::invalid_input("Input too large"));
+        }
+
+        // Validate format
+        if !is_valid_format(&data) {
+            return Err(ErrorData::invalid_input("Invalid format"));
+        }
+
+        // Process...
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Performance Optimization
+
+### Binary Size Reduction
+
+Add to `Cargo.toml`:
+
+```toml
+[profile.release]
+opt-level = "z"     # Optimize for size
+lto = true          # Link-time optimization
+codegen-units = 1   # Better optimization
+strip = true        # Remove symbols
+panic = "abort"     # Smaller binary
+```
+
+### Caching Strategies
+
+```rust
+use moka::future::Cache;
+use std::time::Duration;
+
+struct CachedServer {
+    cache: Cache<String, ToolResult>,
+    inner: MyServer,
+}
+
+impl CachedServer {
+    fn new(inner: MyServer) -> Self {
+        let cache = Cache::builder()
+            .max_capacity(1000)
+            .time_to_live(Duration::from_secs(300))
+            .build();
+
+        Self { cache, inner }
+    }
+
+    async fn execute_cached(&self, tool: &str, params: &str)
+        -> Result<ToolResult, ErrorData>
+    {
+        let cache_key = format!("{}:{}", tool, params);
+
+        match self.cache.get(&cache_key).await {
+            Some(result) => Ok(result),
+            None => {
+                let result = self.inner.execute(tool, params).await?;
+                self.cache.insert(cache_key, result.clone()).await;
+                Ok(result)
+            }
+        }
+    }
+}
+```
+
+## Deployment Checklist
+
+<Steps>
+  <Step title="Build Optimization">
+    - [ ] Release build with `--release`
+    - [ ] Strip debug symbols
+    - [ ] Enable LTO
+    - [ ] Minimize dependencies
+  </Step>
+
+  <Step title="Security">
+    - [ ] Use HTTPS/TLS
+    - [ ] Implement authentication
+    - [ ] Add rate limiting
+    - [ ] Validate all inputs
+    - [ ] Sanitize error messages
+  </Step>
+
+  <Step title="Monitoring">
+    - [ ] Add health check endpoint
+    - [ ] Enable structured logging
+    - [ ] Expose metrics
+    - [ ] Configure alerts
+  </Step>
+
+  <Step title="Reliability">
+    - [ ] Implement graceful shutdown
+    - [ ] Add retry logic
+    - [ ] Configure timeouts
+    - [ ] Test error recovery
+  </Step>
+
+  <Step title="Documentation">
+    - [ ] Update README
+    - [ ] Document configuration
+    - [ ] Provide examples
+    - [ ] Create runbook
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<Warning>
+**Permission Denied on Claude Desktop**
+
+If Claude Desktop can't execute your server:
+
+```bash
+# Make binary executable
+chmod +x /path/to/my-mcp-server
+
+# Check permissions
+ls -l /path/to/my-mcp-server
+```
+</Warning>
+
+<Tip>
+See the [Troubleshooting Guide](/troubleshooting/overview) for complete deployment troubleshooting.
+</Tip>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Testing" icon="vial" href="/guides/testing">
+    Test before deploying
+  </Card>
+  <Card title="Middleware" icon="layer-group" href="/concepts/middleware">
+    Add observability middleware
+  </Card>
+  <Card title="Error Handling" icon="triangle-exclamation" href="/guides/error-handling">
+    Handle production errors
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture/overview">
+    Understand the architecture
+  </Card>
+</CardGroup>

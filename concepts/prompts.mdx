@@ -1,0 +1,314 @@
+---
+title: Prompts
+description: 'Build template-driven interaction patterns'
+---
+
+# Prompts
+
+**Prompts** are reusable templates that help AI assistants interact with your server in standardized ways. They provide structured message templates with arguments, enabling consistent and contextual interactions.
+
+<Tip>
+For comprehensive examples and patterns, see the [Working with Prompts](/guides/working-with-prompts) guide.
+</Tip>
+
+## What is a Prompt?
+
+A **prompt** is:
+- A **name** (e.g., `"analyze_code"`, `"summarize_document"`)
+- A **description** (what the prompt helps accomplish)
+- **Arguments** (parameters the prompt accepts)
+- **Messages** (the actual prompt content with placeholders)
+
+## Basic Example
+
+```rust
+use vulcan::{prompt, prompt_router, ServerHandler};
+use vulcan::handler::server::prompt::PromptRouter;
+use vulcan::model::*;
+
+#[derive(Clone)]
+struct PromptServer {
+    prompt_router: PromptRouter<Self>,
+}
+
+#[prompt_router]
+impl PromptServer {
+    fn new() -> Self {
+        Self {
+            prompt_router: Self::prompt_router(),
+        }
+    }
+
+    #[prompt(
+        name = "analyze_code",
+        description = "Analyze code for potential issues"
+    )]
+    async fn analyze_code(&self, code: String, language: String) -> Result<PromptMessage, ErrorData> {
+        Ok(PromptMessage {
+            role: Role::User,
+            content: TextContent {
+                text: format!(
+                    "Please analyze this {} code for potential bugs, security issues, and style problems:\n\n```{}\n{}\n```",
+                    language, language, code
+                ),
+            }.into(),
+        })
+    }
+}
+```
+
+## Prompt Arguments
+
+Prompts can accept typed arguments:
+
+```rust
+use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
+
+#[derive(Deserialize, JsonSchema)]
+struct AnalyzeCodeArgs {
+    code: String,
+    language: String,
+    focus: Option<String>, // Optional: "security", "performance", "style"
+}
+
+#[prompt(
+    name = "analyze_code",
+    description = "Analyze code with optional focus area"
+)]
+async fn analyze_code(&self, args: AnalyzeCodeArgs) -> Result<Vec<PromptMessage>, ErrorData> {
+    let focus = args.focus.unwrap_or("general".to_string());
+
+    Ok(vec![
+        PromptMessage {
+            role: Role::System,
+            content: TextContent {
+                text: format!("You are a code reviewer focusing on: {}", focus),
+            }.into(),
+        },
+        PromptMessage {
+            role: Role::User,
+            content: TextContent {
+                text: format!("Analyze this {} code:\n\n{}", args.language, args.code),
+            }.into(),
+        },
+    ])
+}
+```
+
+## Multi-Message Prompts
+
+Prompts can return multiple messages for complex interactions:
+
+```rust
+#[prompt(
+    name = "interview_user",
+    description = "Conduct a structured user interview"
+)]
+async fn interview_user(&self, topic: String) -> Result<Vec<PromptMessage>, ErrorData> {
+    Ok(vec![
+        PromptMessage {
+            role: Role::System,
+            content: TextContent {
+                text: "You are conducting a structured interview. Ask open-ended questions and listen actively.".to_string(),
+            }.into(),
+        },
+        PromptMessage {
+            role: Role::User,
+            content: TextContent {
+                text: format!("I'd like to discuss: {}", topic),
+            }.into(),
+        },
+        PromptMessage {
+            role: Role::Assistant,
+            content: TextContent {
+                text: "Thank you for sharing that. Can you tell me more about why this topic is important to you?".to_string(),
+            }.into(),
+        },
+    ])
+}
+```
+
+## Dynamic Prompts
+
+Generate prompts based on server state:
+
+```rust
+#[prompt(
+    name = "suggest_next_action",
+    description = "Suggest the next action based on current state"
+)]
+async fn suggest_next_action(&self) -> Result<Vec<PromptMessage>, ErrorData> {
+    let state = self.get_current_state().await?;
+
+    let suggestion = match state.phase {
+        Phase::Planning => "Review the requirements and create a detailed plan",
+        Phase::Implementation => "Write tests and implement the feature",
+        Phase::Testing => "Run tests and verify all functionality works",
+        Phase::Complete => "Create documentation and prepare for deployment",
+    };
+
+    Ok(vec![
+        PromptMessage {
+            role: Role::System,
+            content: TextContent {
+                text: format!("Current phase: {:?}", state.phase),
+            }.into(),
+        },
+        PromptMessage {
+            role: Role::User,
+            content: TextContent {
+                text: "What should I do next?".to_string(),
+            }.into(),
+        },
+        PromptMessage {
+            role: Role::Assistant,
+            content: TextContent {
+                text: suggestion.to_string(),
+            }.into(),
+        },
+    ])
+}
+```
+
+## Prompt Router
+
+Group prompts together:
+
+```rust
+use vulcan::{prompt, prompt_router};
+use vulcan::handler::server::prompt::PromptRouter;
+
+#[derive(Clone)]
+struct CodeAssistant {
+    prompt_router: PromptRouter<Self>,
+}
+
+#[prompt_router]
+impl CodeAssistant {
+    fn new() -> Self {
+        Self {
+            prompt_router: Self::prompt_router(),
+        }
+    }
+
+    #[prompt(name = "analyze_code", description = "Analyze code")]
+    async fn analyze_code(&self, code: String) -> Result<PromptMessage, ErrorData> {
+        // ...
+    }
+
+    #[prompt(name = "review_pr", description = "Review pull request")]
+    async fn review_pr(&self, pr_url: String) -> Result<Vec<PromptMessage>, ErrorData> {
+        // ...
+    }
+
+    #[prompt(name = "suggest_refactor", description = "Suggest refactoring")]
+    async fn suggest_refactor(&self, code: String) -> Result<PromptMessage, ErrorData> {
+        // ...
+    }
+}
+```
+
+## Server Handler Integration
+
+Use `#[prompt_handler]` to auto-implement `ServerHandler`:
+
+```rust
+use vulcan::{prompt_handler, ServerHandler, model::*};
+
+#[prompt_handler]
+impl ServerHandler for CodeAssistant {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            capabilities: ServerCapabilities::builder()
+                .enable_prompts()
+                .build(),
+            ..Default::default()
+        }
+    }
+}
+```
+
+The `#[prompt_handler]` macro auto-implements:
+- `list_prompts()` - returns all registered prompts
+- `get_prompt()` - retrieves a specific prompt with arguments
+
+## Prompt Types
+
+Prompts can return different message structures:
+
+- **Single message**: `Result<PromptMessage, ErrorData>` - Simple prompts
+- **Multiple messages**: `Result<Vec<PromptMessage>, ErrorData>` - Multi-turn conversations
+- **Dynamic generation**: Use server state to generate contextual prompts
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Keep prompts focused">
+    Each prompt should serve a specific purpose:
+
+    ```rust
+    // ✅ Good - focused prompts
+    #[prompt(name = "analyze_security", description = "Security analysis")]
+    #[prompt(name = "analyze_performance", description = "Performance analysis")]
+
+    // ❌ Bad - too generic
+    #[prompt(name = "analyze_anything", description = "Analyze anything")]
+    ```
+  </Accordion>
+
+  <Accordion title="Use typed arguments">
+    Define struct types for prompt arguments:
+
+    ```rust
+    #[derive(Deserialize, JsonSchema)]
+    struct ReviewArgs {
+        code: String,
+        style_guide: Option<String>,
+    }
+
+    #[prompt(name = "review", description = "Code review")]
+    async fn review(&self, args: ReviewArgs) -> Result<PromptMessage, ErrorData> {
+        // Type-safe access to args.code and args.style_guide
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Provide context">
+    Include system messages with context:
+
+    ```rust
+    Ok(vec![
+        PromptMessage {
+            role: Role::System,
+            content: TextContent {
+                text: "You are a senior developer with 10 years of experience in Rust.".to_string(),
+            }.into(),
+        },
+        PromptMessage {
+            role: Role::User,
+            content: TextContent {
+                text: format!("Review this code: {}", code),
+            }.into(),
+        },
+    ])
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Working with Prompts" icon="message" href="/guides/working-with-prompts">
+    Complete guide with code review, data analysis, and writing examples
+  </Card>
+  <Card title="Tools" icon="wrench" href="/concepts/tools">
+    Learn about tools
+  </Card>
+  <Card title="Building a Server" icon="server" href="/guides/building-server">
+    Build servers with prompts
+  </Card>
+  <Card title="Resources" icon="database" href="/concepts/resources">
+    Learn about resources
+  </Card>
+</CardGroup>

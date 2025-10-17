@@ -1,0 +1,530 @@
+---
+title: Community Examples Overview
+description: 'Real-world Vulcan MCP examples organized by use case and complexity'
+---
+
+# Community Examples Overview
+
+Welcome to the Vulcan community examples! These real-world examples demonstrate production-ready patterns for building MCP servers.
+
+## Browse by Use Case
+
+Find the example that matches your needs:
+
+<CardGroup cols={2}>
+  <Card title="Getting Started" icon="rocket" href="#getting-started-examples">
+    Simple examples for learning Vulcan basics
+  </Card>
+  <Card title="Architecture Patterns" icon="cubes" href="#architecture-examples">
+    DDD, Hexagonal, and middleware patterns
+  </Card>
+  <Card title="Authentication & Security" icon="lock" href="#security-examples">
+    OAuth, JWT, and secure server patterns
+  </Card>
+  <Card title="Data Integration" icon="database" href="#data-examples">
+    Database, API, and external service integration
+  </Card>
+</CardGroup>
+
+---
+
+## Getting Started Examples
+
+Perfect for learning Vulcan fundamentals:
+
+### Counter Server
+
+<Card title="Counter Server" icon="hashtag" href="/examples-docs/counter-server">
+  **Difficulty:** Beginner ⭐
+  **Concepts:** Basic tool creation, state management, stdio transport
+
+  A simple stateful server that demonstrates:
+  - Creating tools with `#[tool]` macro
+  - Managing server state with Arc<Mutex<T>>
+  - Stdio transport for Claude Desktop
+  - Zero-boilerplate tool registration
+
+  **Perfect for:** First-time Vulcan users, understanding tool basics
+</Card>
+
+**Key takeaways:**
+```rust
+#[tool(description = "Increment counter")]
+async fn increment(&self) -> Result<i32, ErrorData> {
+    let mut count = self.count.lock().await;
+    *count += 1;
+    Ok(*count)
+}
+```
+
+---
+
+## Architecture Examples
+
+Demonstrates advanced architectural patterns:
+
+### Ports and Adapters Pattern
+
+<Card title="Ports & Adapters" icon="plug" href="/examples-docs/ports-adapters">
+  **Difficulty:** Intermediate ⭐⭐
+  **Concepts:** Hexagonal architecture, dependency injection, testability
+
+  Production-ready architecture showing:
+  - Domain layer with business logic
+  - Port traits for boundaries
+  - Swappable adapters (InMemory → Postgres)
+  - Integration-First testing
+
+  **Perfect for:** Building maintainable servers, understanding DDD
+</Card>
+
+**Architecture overview:**
+```
+Domain (Tool, Resource)
+  ↓ uses
+Ports (ToolRepository trait)
+  ↓ implemented by
+Adapters (InMemoryRepo, PostgresRepo)
+```
+
+### Advanced Middleware
+
+<Card title="Middleware Patterns" icon="layer-group" href="/examples-docs/middleware">
+  **Difficulty:** Intermediate ⭐⭐
+  **Concepts:** Middleware chain, cross-cutting concerns, observability
+
+  Comprehensive middleware examples:
+  - Logging with correlation IDs
+  - Metrics collection (Prometheus)
+  - Request retry logic
+  - Timeout enforcement
+  - Custom middleware creation
+
+  **Perfect for:** Production servers, observability, resilience patterns
+</Card>
+
+**Middleware chain example:**
+```rust
+let mut chain = MiddlewareChain::new();
+chain.add(Arc::new(LoggingMiddleware::new()));
+chain.add(Arc::new(MetricsMiddleware::new()));
+chain.add(Arc::new(RetryMiddleware::new(3)));
+
+server.serve_with_middleware(transport, chain).await?;
+```
+
+---
+
+## Security Examples
+
+Authentication, authorization, and secure patterns:
+
+### OAuth Integration
+
+<Card title="OAuth 2.0 Server" icon="lock" href="/examples-docs/oauth">
+  **Difficulty:** Advanced ⭐⭐⭐
+  **Concepts:** OAuth 2.0, secure tokens, authorization middleware
+
+  Complete OAuth 2.0 implementation:
+  - Authorization code flow
+  - Token validation middleware
+  - Secure credential storage
+  - Refresh token handling
+  - Production-ready patterns
+
+  **Perfect for:** Multi-user services, third-party integrations
+</Card>
+
+**Security best practices:**
+- ✅ Store tokens in secure storage (OS keychain)
+- ✅ Validate tokens in middleware
+- ✅ Use HTTPS in production
+- ✅ Implement token rotation
+- ✅ Rate limit by user/IP
+
+---
+
+## Data Integration Examples
+
+Working with databases, APIs, and external services:
+
+### Database Integration
+
+<Card title="Database Integration" icon="database" href="/examples-docs/database-integration">
+  **Difficulty:** Intermediate ⭐⭐
+  **Concepts:** Async database access, connection pooling, transactions
+
+  Production database patterns:
+  - SQLx for type-safe queries
+  - Connection pool management
+  - Transaction handling
+  - Error mapping to ErrorData
+  - Migration strategies
+
+  **Perfect for:** Data-driven servers, CRUD operations
+</Card>
+
+**Database patterns:**
+```rust
+#[tool(description = "Create user")]
+async fn create_user(
+    &self,
+    name: String,
+    email: String
+) -> Result<User, ErrorData> {
+    let user = sqlx::query_as!(
+        User,
+        "INSERT INTO users (name, email) VALUES ($1, $2) RETURNING *",
+        name,
+        email
+    )
+    .fetch_one(&self.pool)
+    .await?;  // Auto-converts sqlx::Error → ErrorData
+
+    Ok(user)
+}
+```
+
+---
+
+## Browse All Examples
+
+<AccordionGroup>
+  <Accordion title="By Difficulty">
+    **Beginner ⭐**
+    - [Counter Server](/examples-docs/counter-server) - Basic tool creation and state
+
+    **Intermediate ⭐⭐**
+    - [Ports & Adapters](/examples-docs/ports-adapters) - Hexagonal architecture
+    - [Middleware](/examples-docs/middleware) - Cross-cutting concerns
+    - [Database Integration](/examples-docs/database-integration) - SQLx patterns
+
+    **Advanced ⭐⭐⭐**
+    - [OAuth 2.0](/examples-docs/oauth) - Secure authentication
+  </Accordion>
+
+  <Accordion title="By Transport Type">
+    **Stdio Transport**
+    - [Counter Server](/examples-docs/counter-server) - Claude Desktop integration
+    - [Ports & Adapters](/examples-docs/ports-adapters) - Architecture patterns
+
+    **HTTP/REST Transport**
+    - [Database Integration](/examples-docs/database-integration) - Web API server
+    - [OAuth 2.0](/examples-docs/oauth) - Secure web service
+
+    **Multiple Transports**
+    - [Middleware](/examples-docs/middleware) - Works with any transport
+  </Accordion>
+
+  <Accordion title="By Feature">
+    **State Management**
+    - [Counter Server](/examples-docs/counter-server) - Arc<Mutex<T>> patterns
+
+    **Middleware**
+    - [Middleware](/examples-docs/middleware) - Logging, metrics, retry, timeout
+    - [OAuth 2.0](/examples-docs/oauth) - Token validation middleware
+
+    **Architecture**
+    - [Ports & Adapters](/examples-docs/ports-adapters) - DDD + Hexagonal
+
+    **External Services**
+    - [Database Integration](/examples-docs/database-integration) - SQLx + Postgres
+    - [OAuth 2.0](/examples-docs/oauth) - OAuth providers
+  </Accordion>
+
+  <Accordion title="By Deployment">
+    **Local Development**
+    - [Counter Server](/examples-docs/counter-server) - Stdio for Claude Desktop
+
+    **Production Web Service**
+    - [Database Integration](/examples-docs/database-integration) - HTTP + database
+    - [OAuth 2.0](/examples-docs/oauth) - HTTPS + secure tokens
+
+    **Docker/Container**
+    - [Database Integration](/examples-docs/database-integration) - Docker Compose example
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Example Templates
+
+Use these templates to create your own examples:
+
+### Basic Tool Server Template
+
+```rust
+use vulcan::prelude::*;
+
+#[derive(Clone)]
+struct MyServer {
+    tool_router: ToolRouter<Self>,
+}
+
+#[tool_router]
+impl MyServer {
+    fn new() -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    #[tool(description = "Your tool description")]
+    async fn my_tool(&self, param: String) -> Result<String, ErrorData> {
+        // Your logic here
+        Ok(format!("Processed: {}", param))
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for MyServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+            server_info: Implementation {
+                name: "my-server".to_string(),
+                version: "1.0.0".to_string(),
+                ..Default::default()
+            },
+            instructions: Some("Server instructions".to_string()),
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let transport = StdioTransport::new();
+    MyServer::new().serve(transport).await?;
+    Ok(())
+}
+```
+
+### Middleware-Enabled Server Template
+
+```rust
+use vulcan::prelude::*;
+use vulcan::adapters::middleware::{LoggingMiddleware, MetricsMiddleware};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create middleware chain
+    let mut chain = MiddlewareChain::new();
+    chain.add(Arc::new(LoggingMiddleware::new()));
+    chain.add(Arc::new(MetricsMiddleware::new()));
+
+    // Serve with middleware
+    let transport = StdioTransport::new();
+    MyServer::new().serve_with_middleware(transport, chain).await?;
+    Ok(())
+}
+```
+
+### Database-Backed Server Template
+
+```rust
+use sqlx::PgPool;
+
+#[derive(Clone)]
+struct DatabaseServer {
+    tool_router: ToolRouter<Self>,
+    pool: PgPool,
+}
+
+impl DatabaseServer {
+    async fn new(database_url: &str) -> Result<Self, sqlx::Error> {
+        let pool = PgPool::connect(database_url).await?;
+        Ok(Self {
+            tool_router: Self::tool_router(),
+            pool,
+        })
+    }
+}
+
+#[tool_router]
+impl DatabaseServer {
+    #[tool(description = "Query database")]
+    async fn query_data(&self, id: i32) -> Result<Data, ErrorData> {
+        let data = sqlx::query_as!(Data, "SELECT * FROM data WHERE id = $1", id)
+            .fetch_one(&self.pool)
+            .await?;  // sqlx::Error auto-converts to ErrorData
+        Ok(data)
+    }
+}
+```
+
+---
+
+## Contributing Examples
+
+We welcome community examples! Here's how to contribute:
+
+### Example Requirements
+
+<Steps>
+  <Step title="1. Choose a Clear Use Case">
+    Focus on a specific real-world problem:
+    - ✅ "OAuth 2.0 integration with GitHub"
+    - ✅ "Streaming responses with SSE"
+    - ❌ "Random example" (too vague)
+  </Step>
+
+  <Step title="2. Follow Production Patterns">
+    Use best practices:
+    - Error handling with `ErrorData`
+    - Async/await properly
+    - Connection pooling for databases
+    - Middleware for cross-cutting concerns
+    - Comprehensive logging
+  </Step>
+
+  <Step title="3. Include Complete Code">
+    Provide runnable examples:
+    - Full source code
+    - Cargo.toml with dependencies
+    - README with setup instructions
+    - Test suite demonstrating usage
+  </Step>
+
+  <Step title="4. Document Thoroughly">
+    Explain the "why" not just the "what":
+    - Problem statement
+    - Architecture decisions
+    - Trade-offs made
+    - Common pitfalls
+    - Production considerations
+  </Step>
+</Steps>
+
+### Example Structure
+
+```
+examples/my-example/
+├── README.md           # Overview and setup
+├── Cargo.toml          # Dependencies
+├── src/
+│   ├── main.rs        # Server implementation
+│   └── lib.rs         # Reusable components
+├── tests/
+│   └── integration_test.rs  # Working tests
+└── docs/
+    └── architecture.md # Design decisions
+```
+
+### Submission Checklist
+
+Before submitting your example:
+
+- [ ] Code compiles and runs without errors
+- [ ] Tests pass (`cargo test`)
+- [ ] Clippy passes (`cargo clippy`)
+- [ ] Formatted (`cargo fmt`)
+- [ ] README includes:
+  - [ ] Problem description
+  - [ ] Prerequisites
+  - [ ] Setup instructions
+  - [ ] Usage examples
+  - [ ] Architecture explanation
+- [ ] Code includes:
+  - [ ] Error handling
+  - [ ] Logging/tracing
+  - [ ] Comments for complex logic
+  - [ ] Type annotations
+- [ ] Example demonstrates:
+  - [ ] Best practices
+  - [ ] Production patterns
+  - [ ] Common use case
+
+### Submit Your Example
+
+<Card title="GitHub Discussions" icon="github" href="https://github.com/your-org/vulcan-mcp-sdk/discussions">
+  Share your example in GitHub Discussions under the "Examples" category
+</Card>
+
+**Process:**
+1. Post your example in Discussions with "Example:" prefix
+2. Community feedback and review
+3. Maintainers may add to official examples
+4. Credit given in example documentation
+
+---
+
+## Request an Example
+
+Don't see an example for your use case? Request one:
+
+<AccordionGroup>
+  <Accordion title="Most Requested Examples">
+    Community members are working on these:
+
+    **Integration Examples:**
+    - [ ] GraphQL API integration
+    - [ ] Redis caching layer
+    - [ ] S3 file operations
+    - [ ] Stripe payment processing
+
+    **Transport Examples:**
+    - [ ] WebSocket server with rooms
+    - [ ] gRPC transport adapter
+    - [ ] Custom binary protocol
+
+    **Advanced Patterns:**
+    - [ ] Event sourcing with MCP
+    - [ ] CQRS pattern
+    - [ ] Saga pattern for distributed transactions
+    - [ ] Rate limiting strategies
+  </Accordion>
+
+  <Accordion title="How to Request">
+    1. Check [GitHub Discussions](https://github.com/your-org/vulcan-mcp-sdk/discussions)
+    2. Search for existing requests
+    3. Create new discussion: "Example Request: [Your Use Case]"
+    4. Describe:
+       - Problem you're solving
+       - Technologies involved
+       - Expected complexity
+       - Why you need this example
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Example Quality Standards
+
+All official examples meet these standards:
+
+| Criterion | Requirement |
+|-----------|------------|
+| **Code Quality** | Passes clippy with no warnings |
+| **Testing** | >80% coverage, integration tests included |
+| **Documentation** | README + inline comments + architecture doc |
+| **Error Handling** | Comprehensive ErrorData usage |
+| **Performance** | No obvious bottlenecks, async best practices |
+| **Security** | No hardcoded secrets, input validation |
+| **Production Ready** | Logging, metrics, graceful shutdown |
+
+<Tip>
+**Pro Tip:** The best examples solve a real problem you've encountered. If you've built something useful with Vulcan, share it with the community!
+</Tip>
+
+---
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Start Learning" icon="graduation-cap" href="/examples-docs/counter-server">
+    Begin with the Counter Server
+  </Card>
+  <Card title="Architecture Deep Dive" icon="cubes" href="/examples-docs/ports-adapters">
+    Learn Hexagonal patterns
+  </Card>
+  <Card title="Production Ready" icon="rocket" href="/examples-docs/oauth">
+    See production patterns
+  </Card>
+</CardGroup>
+
+<Card title="Contribute" icon="code-branch" href="https://github.com/your-org/vulcan-mcp-sdk/discussions">
+  Share your examples with the community
+</Card>

@@ -1,0 +1,513 @@
+---
+title: Middleware Example
+description: 'Add observability with logging, metrics, and tracing middleware'
+---
+
+# Middleware Example
+
+Learn how to add cross-cutting concerns like logging, metrics, and tracing using Vulcan's middleware system.
+
+## What You'll Build
+
+An MCP server with a comprehensive middleware stack:
+- **Logging** - Track all tool executions
+- **Metrics** - Count invocations and errors
+- **Tracing** - Correlate requests with correlation IDs
+- **Timeout** - Prevent long-running operations
+- **Retry** - Auto-retry failed operations
+
+## Complete Code
+
+```rust src/main.rs
+use std::sync::Arc;
+use std::time::Duration;
+use vulcan::{
+    tool, tool_router, tool_handler,
+    ServerHandler, ErrorData,
+    model::*,
+    handler::server::tool::ToolRouter,
+    service::ServiceExt,
+    ports::MiddlewareChain,
+    adapters::{
+        LoggingMiddleware,
+        MetricsMiddleware,
+        TracingMiddleware,
+        TimeoutMiddleware,
+        RetryMiddleware,
+    },
+};
+
+#[derive(Clone)]
+pub struct CalculatorServer {
+    tool_router: ToolRouter<Self>,
+}
+
+#[tool_router]
+impl CalculatorServer {
+    fn new() -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    #[tool(description = "Add two numbers")]
+    async fn add(&self, a: i32, b: i32) -> Result<i32, ErrorData> {
+        Ok(a + b)
+    }
+
+    #[tool(description = "Divide two numbers")]
+    async fn divide(&self, a: i32, b: i32) -> Result<i32, ErrorData> {
+        if b == 0 {
+            return Err(ErrorData::invalid_input("Division by zero"));
+        }
+        Ok(a / b)
+    }
+
+    #[tool(description = "Slow operation (simulates delay)")]
+    async fn slow_operation(&self, delay_ms: u64) -> Result<String, ErrorData> {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        Ok(format!("Completed after {}ms", delay_ms))
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for CalculatorServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+            server_info: Implementation {
+                name: "calculator-with-middleware".to_string(),
+                version: "1.0.0".to_string(),
+                ..Default::default()
+            },
+            instructions: Some(
+                "Calculator server with comprehensive middleware stack.".to_string()
+            ),
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create middleware chain
+    let mut chain = MiddlewareChain::new();
+
+    // Add middlewares in order
+    chain.add(Arc::new(LoggingMiddleware::with_prefix("Calculator".to_string())));
+    chain.add(Arc::new(TracingMiddleware::new()));
+    chain.add(Arc::new(MetricsMiddleware::new()));
+    chain.add(Arc::new(TimeoutMiddleware::new(Duration::from_secs(5))));
+    chain.add(Arc::new(RetryMiddleware::new(3)));
+
+    // Create server with middleware
+    let server = CalculatorServer::new();
+
+    // Serve with middleware chain
+    server.serve_with_middleware(
+        (tokio::io::stdin(), tokio::io::stdout()),
+        chain
+    ).await?;
+
+    Ok(())
+}
+```
+
+## Middleware Breakdown
+
+### 1. Logging Middleware
+
+Logs every tool execution:
+
+```rust
+use vulcan::adapters::LoggingMiddleware;
+
+// Basic logging
+let logging = LoggingMiddleware::new();
+
+// With custom prefix
+let logging = LoggingMiddleware::with_prefix("MyServer".to_string());
+```
+
+**Output:**
+```
+[MyServer] Before executing tool: add
+[MyServer] Tool 'add' succeeded
+```
+
+### 2. Metrics Middleware
+
+Tracks invocations and errors:
+
+```rust
+use vulcan::adapters::MetricsMiddleware;
+
+let metrics = MetricsMiddleware::new();
+
+// Later, access metrics
+println!("Total invocations: {}", metrics.invocation_count());
+println!("Total errors: {}", metrics.error_count());
+```
+
+**Use case:** Export to Prometheus, track SLAs
+
+### 3. Tracing Middleware
+
+Adds correlation IDs for request tracing:
+
+```rust
+use vulcan::adapters::TracingMiddleware;
+
+let tracing = TracingMiddleware::new();
+```
+
+**Output:**
+```
+[correlation_id: 550e8400-e29b-41d4-a716-446655440000] Executing tool: add
+```
+
+**Use case:** Correlate logs across distributed systems
+
+### 4. Timeout Middleware
+
+Prevents long-running operations:
+
+```rust
+use vulcan::adapters::TimeoutMiddleware;
+use std::time::Duration;
+
+// 5-second timeout
+let timeout = TimeoutMiddleware::new(Duration::from_secs(5));
+```
+
+**Behavior:**
+- Operations exceeding timeout return error
+- Prevents resource exhaustion
+
+### 5. Retry Middleware
+
+Auto-retries failed operations:
+
+```rust
+use vulcan::adapters::RetryMiddleware;
+
+// Retry up to 3 times
+let retry = RetryMiddleware::new(3);
+```
+
+**Behavior:**
+- Retries transient failures
+- Exponential backoff between retries
+- Gives up after max attempts
+
+## Custom Middleware
+
+Create your own middleware for domain-specific concerns:
+
+```rust
+use vulcan::{ports::Middleware, domain::Tool, ErrorData, ports::MiddlewareContext};
+
+pub struct AuthenticationMiddleware {
+    api_key: String,
+}
+
+impl AuthenticationMiddleware {
+    pub fn new(api_key: String) -> Self {
+        Self { api_key }
+    }
+}
+
+#[async_trait::async_trait]
+impl Middleware for AuthenticationMiddleware {
+    async fn before_execute(
+        &self,
+        tool: &Tool,
+        params: &serde_json::Value,
+        context: &mut MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        // Extract API key from params
+        let provided_key = params.get("api_key")
+            .and_then(|v| v.as_str())
+            .ok_or(ErrorData::invalid_input("API key required"))?;
+
+        // Validate
+        if provided_key != self.api_key {
+            return Err(ErrorData::invalid_input("Invalid API key"));
+        }
+
+        println!("✅ Authentication successful for tool: {}", tool.name());
+        Ok(())
+    }
+
+    async fn after_execute(
+        &self,
+        _tool: &Tool,
+        _params: &serde_json::Value,
+        _result: &serde_json::Value,
+        _context: &MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        Ok(())
+    }
+
+    async fn on_error(
+        &self,
+        _tool: &Tool,
+        _params: &serde_json::Value,
+        _error: &ErrorData,
+        _context: &MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        Ok(())
+    }
+}
+
+// Use it
+let mut chain = MiddlewareChain::new();
+chain.add(Arc::new(AuthenticationMiddleware::new("secret-key".to_string())));
+```
+
+## Middleware Order Matters
+
+The order you add middleware affects execution:
+
+```rust
+let mut chain = MiddlewareChain::new();
+
+// ✅ Good order
+chain.add(Arc::new(LoggingMiddleware::new()));      // 1. Log first
+chain.add(Arc::new(TracingMiddleware::new()));      // 2. Add correlation ID
+chain.add(Arc::new(TimeoutMiddleware::new(...)));   // 3. Apply timeout
+chain.add(Arc::new(RetryMiddleware::new(3)));       // 4. Retry on failure
+chain.add(Arc::new(MetricsMiddleware::new()));      // 5. Track metrics
+
+// ❌ Bad order
+chain.add(Arc::new(RetryMiddleware::new(3)));       // Retry first - won't see logs!
+chain.add(Arc::new(LoggingMiddleware::new()));      // Logs only final attempt
+```
+
+**Execution flow:**
+```
+Request → Logging → Tracing → Timeout → Retry → Metrics → Tool → Metrics → ... → Response
+```
+
+## Advanced Patterns
+
+### Conditional Middleware
+
+Apply middleware based on tool name:
+
+```rust
+pub struct ConditionalMiddleware {
+    inner: Arc<dyn Middleware>,
+    allowed_tools: Vec<String>,
+}
+
+#[async_trait::async_trait]
+impl Middleware for ConditionalMiddleware {
+    async fn before_execute(
+        &self,
+        tool: &Tool,
+        params: &serde_json::Value,
+        context: &mut MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        // Only apply to allowed tools
+        if self.allowed_tools.contains(&tool.name().to_string()) {
+            self.inner.before_execute(tool, params, context).await?;
+        }
+        Ok(())
+    }
+
+    // ... other methods
+}
+```
+
+### Middleware with State
+
+Track per-request state:
+
+```rust
+use std::collections::HashMap;
+
+pub struct RateLimitMiddleware {
+    limits: Arc<Mutex<HashMap<String, Vec<std::time::Instant>>>>,
+    max_requests: usize,
+    window: Duration,
+}
+
+#[async_trait::async_trait]
+impl Middleware for RateLimitMiddleware {
+    async fn before_execute(
+        &self,
+        tool: &Tool,
+        params: &serde_json::Value,
+        context: &mut MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        let tool_name = tool.name().to_string();
+        let mut limits = self.limits.lock().await;
+
+        let requests = limits.entry(tool_name.clone()).or_insert_with(Vec::new);
+
+        // Remove old requests outside window
+        let now = std::time::Instant::now();
+        requests.retain(|&t| now.duration_since(t) < self.window);
+
+        // Check rate limit
+        if requests.len() >= self.max_requests {
+            return Err(ErrorData::invalid_input(
+                format!("Rate limit exceeded for tool: {}", tool_name)
+            ));
+        }
+
+        // Record this request
+        requests.push(now);
+
+        Ok(())
+    }
+
+    // ... other methods
+}
+```
+
+## Testing with Middleware
+
+Test middleware in isolation:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vulcan::domain::Tool;
+
+    #[tokio::test]
+    async fn test_logging_middleware() {
+        let logging = LoggingMiddleware::new();
+
+        let tool = Tool::new(
+            "test_tool".to_string(),
+            "Test tool".to_string(),
+            serde_json::json!({}),
+        ).unwrap();
+
+        let mut context = MiddlewareContext::new("test-correlation-id".to_string());
+
+        // Should not error
+        logging.before_execute(&tool, &serde_json::json!({}), &mut context)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_metrics_middleware() {
+        let metrics = MetricsMiddleware::new();
+
+        assert_eq!(metrics.invocation_count(), 0);
+
+        let tool = Tool::new("test".to_string(), "Test".to_string(), serde_json::json!({})).unwrap();
+        let mut context = MiddlewareContext::new("test-id".to_string());
+
+        metrics.before_execute(&tool, &serde_json::json!({}), &mut context).await.unwrap();
+
+        assert_eq!(metrics.invocation_count(), 1);
+    }
+}
+```
+
+## Observability Stack
+
+Combine middleware for full observability:
+
+```rust
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+// Create shared metrics
+let metrics = Arc::new(MetricsMiddleware::new());
+
+// Build observability stack
+let mut chain = MiddlewareChain::new();
+chain.add(Arc::new(LoggingMiddleware::with_prefix("Prod".to_string())));
+chain.add(Arc::new(TracingMiddleware::new()));
+chain.add(Arc::new(metrics.clone()));
+chain.add(Arc::new(TimeoutMiddleware::new(Duration::from_secs(30))));
+
+// Start server
+server.serve_with_middleware(transport, chain).await?;
+
+// Expose metrics endpoint (separate HTTP server)
+tokio::spawn(async move {
+    let app = axum::Router::new()
+        .route("/metrics", get({
+            let m = metrics.clone();
+            move || async move {
+                format!(
+                    "invocations: {}\nerrors: {}",
+                    m.invocation_count(),
+                    m.error_count()
+                )
+            }
+        }));
+
+    axum::Server::bind(&"0.0.0.0:9090".parse().unwrap())
+        .serve(app.into_make_service())
+        .await
+});
+```
+
+## Key Takeaways
+
+<AccordionGroup>
+  <Accordion title="Middleware Composition">
+    Build complex behaviors from simple middleware:
+
+    ```rust
+    Logging + Tracing + Metrics + Timeout + Retry = Production-Ready
+    ```
+  </Accordion>
+
+  <Accordion title="Order Matters">
+    Middleware executes in the order added:
+
+    ```rust
+    chain.add(A);  // Runs first
+    chain.add(B);  // Runs second
+    chain.add(C);  // Runs third
+    ```
+  </Accordion>
+
+  <Accordion title="Shared State">
+    Use `Arc` to share middleware state:
+
+    ```rust
+    let metrics = Arc::new(MetricsMiddleware::new());
+    chain.add(metrics.clone());
+    // Access metrics later
+    println!("{}", metrics.invocation_count());
+    ```
+  </Accordion>
+
+  <Accordion title="Custom Middleware">
+    Implement `Middleware` trait for domain logic:
+
+    - `before_execute` - Pre-processing
+    - `after_execute` - Post-processing
+    - `on_error` - Error handling
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Ports & Adapters" icon="plug" href="/examples-docs/ports-adapters">
+    Advanced architecture patterns
+  </Card>
+  <Card title="OAuth Example" icon="lock" href="/examples-docs/oauth">
+    Add authentication
+  </Card>
+  <Card title="Deployment" icon="rocket" href="/guides/deployment">
+    Deploy with middleware
+  </Card>
+  <Card title="Testing" icon="vial" href="/guides/testing">
+    Test middleware integration
+  </Card>
+</CardGroup>

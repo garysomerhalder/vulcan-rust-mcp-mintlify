@@ -1,0 +1,545 @@
+---
+title: Working with Resources
+description: 'Complete guide to MCP resources - files, APIs, databases, and custom resources'
+---
+
+# Working with Resources
+
+Learn how to expose data through MCP resources with URI-based access patterns.
+
+## What Are Resources?
+
+Resources in MCP provide **read access to data** through URI-based identifiers. Think of them as RESTful GET endpoints for your data.
+
+<CardGroup cols={2}>
+  <Card title="URI-Based" icon="link">
+    Access data via unique URIs like `file:///path` or `github:///repo/123`
+  </Card>
+  <Card title="Read-Only" icon="eye">
+    Resources are for reading data, tools are for actions
+  </Card>
+  <Card title="Templates" icon="puzzle-piece">
+    Dynamic URIs with parameters
+  </Card>
+  <Card title="Type-Safe" icon="shield">
+    Strong typing with Rust's type system
+  </Card>
+</CardGroup>
+
+## Resource vs Tool
+
+| Feature | Resource | Tool |
+|---------|----------|------|
+| **Purpose** | Read data | Perform actions |
+| **Access Pattern** | URI-based | Method call |
+| **Side Effects** | No | Yes |
+| **Caching** | Safe to cache | Not cacheable |
+| **Example** | Read file contents | Create file |
+
+## Complete Examples
+
+### 1. File System Resources
+
+A complete file server exposing files as resources:
+
+```rust
+use std::path::PathBuf;
+use vulcan::{
+    resource, resource_router, resource_handler,
+    ServerHandler, ErrorData,
+    model::*,
+    handler::server::resource::ResourceRouter,
+};
+
+#[derive(Clone)]
+pub struct FileServer {
+    base_path: PathBuf,
+    resource_router: ResourceRouter<Self>,
+}
+
+#[resource_router]
+impl FileServer {
+    fn new(base_path: PathBuf) -> Self {
+        Self {
+            base_path,
+            resource_router: Self::resource_router(),
+        }
+    }
+
+    #[resource(
+        uri = "file:///{path}",
+        name = "File Resource",
+        description = "Read file contents",
+        mime_type = "text/plain"
+    )]
+    async fn read_file(&self, path: String) -> Result<ResourceContents, ErrorData> {
+        let full_path = self.base_path.join(&path);
+
+        // Security: prevent directory traversal
+        if !full_path.starts_with(&self.base_path) {
+            return Err(ErrorData::invalid_input("Invalid path - directory traversal detected"));
+        }
+
+        // Check if file exists
+        if !full_path.exists() {
+            return Err(ErrorData::not_found(format!("File not found: {}", path)));
+        }
+
+        // Check if it's a file (not directory)
+        if !full_path.is_file() {
+            return Err(ErrorData::invalid_input("Path is not a file"));
+        }
+
+        // Read file contents
+        let contents = tokio::fs::read_to_string(&full_path).await
+            .map_err(|e| ErrorData::internal(format!("Failed to read file: {}", e)))?;
+
+        Ok(ResourceContents::text(contents))
+    }
+
+    #[resource(
+        uri = "file:///{path}/metadata",
+        name = "File Metadata",
+        description = "Get file metadata",
+        mime_type = "application/json"
+    )]
+    async fn file_metadata(&self, path: String) -> Result<ResourceContents, ErrorData> {
+        let full_path = self.base_path.join(&path);
+
+        if !full_path.starts_with(&self.base_path) {
+            return Err(ErrorData::invalid_input("Invalid path"));
+        }
+
+        let metadata = tokio::fs::metadata(&full_path).await?;
+
+        let info = serde_json::json!({
+            "size": metadata.len(),
+            "is_file": metadata.is_file(),
+            "is_dir": metadata.is_dir(),
+            "modified": metadata.modified().ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()),
+        });
+
+        Ok(ResourceContents::text(serde_json::to_string_pretty(&info)?))
+    }
+
+    // List all available files
+    async fn list_files_recursive(&self, dir: &PathBuf, prefix: &str)
+        -> Result<Vec<Resource>, ErrorData>
+    {
+        let mut resources = Vec::new();
+
+        let mut entries = tokio::fs::read_dir(dir).await?;
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let relative = path.strip_prefix(&self.base_path)
+                .map_err(|_| ErrorData::internal("Path error"))?;
+
+            if path.is_file() {
+                let uri = format!("file:///{}", relative.display());
+                resources.push(Resource {
+                    uri: uri.clone(),
+                    name: entry.file_name().to_string_lossy().to_string(),
+                    description: Some(format!("File: {}", relative.display())),
+                    mime_type: Some("text/plain".to_string()),
+                });
+            } else if path.is_dir() {
+                let nested = self.list_files_recursive(&path, prefix).await?;
+                resources.extend(nested);
+            }
+        }
+
+        Ok(resources)
+    }
+}
+
+#[resource_handler]
+impl ServerHandler for FileServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            capabilities: ServerCapabilities::builder()
+                .enable_resources()
+                .build(),
+            server_info: Implementation {
+                name: "file-server".to_string(),
+                version: "1.0.0".to_string(),
+                ..Default::default()
+            },
+            instructions: Some(
+                "File server exposing local files as MCP resources.".to_string()
+            ),
+        }
+    }
+
+    async fn list_resources(&self) -> Result<Vec<Resource>, ErrorData> {
+        self.list_files_recursive(&self.base_path, "").await
+    }
+}
+```
+
+### 2. API Resources (GitHub Example)
+
+Expose external APIs as resources:
+
+```rust
+use octocrab::Octocrab;
+
+#[derive(Clone)]
+pub struct GitHubServer {
+    client: Octocrab,
+    resource_router: ResourceRouter<Self>,
+}
+
+#[resource_router]
+impl GitHubServer {
+    #[resource(
+        uri = "github:///{owner}/{repo}/issues/{number}",
+        name = "GitHub Issue",
+        description = "Get GitHub issue details",
+        mime_type = "application/json"
+    )]
+    async fn get_issue(
+        &self,
+        owner: String,
+        repo: String,
+        number: i64,
+    ) -> Result<ResourceContents, ErrorData> {
+        let issue = self.client
+            .issues(&owner, &repo)
+            .get(number as u64)
+            .await
+            .map_err(|e| ErrorData::internal(format!("GitHub API error: {}", e)))?;
+
+        let json = serde_json::to_string_pretty(&issue)?;
+        Ok(ResourceContents::text(json))
+    }
+
+    #[resource(
+        uri = "github:///{owner}/{repo}/readme",
+        name = "Repository README",
+        description = "Get repository README",
+        mime_type = "text/markdown"
+    )]
+    async fn get_readme(
+        &self,
+        owner: String,
+        repo: String,
+    ) -> Result<ResourceContents, ErrorData> {
+        let readme = self.client
+            .repos(&owner, &repo)
+            .get_readme()
+            .await
+            .map_err(|e| ErrorData::internal(format!("Failed to get README: {}", e)))?;
+
+        // Decode base64 content
+        let content = String::from_utf8(
+            base64::decode(&readme.content)?
+        )?;
+
+        Ok(ResourceContents::text(content))
+    }
+
+    #[resource(
+        uri = "github:///{owner}/{repo}/file/{path}",
+        name = "Repository File",
+        description = "Get file from repository",
+        mime_type = "text/plain"
+    )]
+    async fn get_file(
+        &self,
+        owner: String,
+        repo: String,
+        path: String,
+    ) -> Result<ResourceContents, ErrorData> {
+        let content = self.client
+            .repos(&owner, &repo)
+            .get_content()
+            .path(&path)
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal(format!("Failed to get file: {}", e)))?;
+
+        if let Some(items) = content.items {
+            if let Some(first) = items.first() {
+                let decoded = String::from_utf8(base64::decode(&first.content)?)?;
+                return Ok(ResourceContents::text(decoded));
+            }
+        }
+
+        Err(ErrorData::not_found("File not found"))
+    }
+}
+```
+
+### 3. Database Resources
+
+Expose database records as resources:
+
+```rust
+use sqlx::{PgPool, FromRow};
+
+#[derive(Clone)]
+pub struct DatabaseServer {
+    pool: PgPool,
+    resource_router: ResourceRouter<Self>,
+}
+
+#[derive(FromRow, Serialize)]
+struct User {
+    id: i64,
+    name: String,
+    email: String,
+}
+
+#[resource_router]
+impl DatabaseServer {
+    #[resource(
+        uri = "db:///users/{id}",
+        name = "User Record",
+        description = "Get user by ID",
+        mime_type = "application/json"
+    )]
+    async fn get_user(&self, id: i64) -> Result<ResourceContents, ErrorData> {
+        let user = sqlx::query_as::<_, User>(
+            "SELECT id, name, email FROM users WHERE id = $1"
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|_| ErrorData::not_found(format!("User {} not found", id)))?;
+
+        let json = serde_json::to_string_pretty(&user)?;
+        Ok(ResourceContents::text(json))
+    }
+
+    #[resource(
+        uri = "db:///users",
+        name = "All Users",
+        description = "List all users",
+        mime_type = "application/json"
+    )]
+    async fn list_users(&self) -> Result<ResourceContents, ErrorData> {
+        let users = sqlx::query_as::<_, User>(
+            "SELECT id, name, email FROM users ORDER BY id"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let json = serde_json::to_string_pretty(&users)?;
+        Ok(ResourceContents::text(json))
+    }
+}
+```
+
+## Resource Templates
+
+Dynamic URIs with parameters:
+
+<Tabs>
+  <Tab title="Simple Template">
+    ```rust
+    #[resource(uri = "file:///{path}")]
+    async fn read_file(&self, path: String) -> Result<ResourceContents, ErrorData> {
+        // path is extracted from URI
+    }
+    ```
+  </Tab>
+
+  <Tab title="Multiple Parameters">
+    ```rust
+    #[resource(uri = "github:///{owner}/{repo}/issues/{number}")]
+    async fn get_issue(
+        &self,
+        owner: String,
+        repo: String,
+        number: i64,
+    ) -> Result<ResourceContents, ErrorData> {
+        // All parameters extracted from URI
+    }
+    ```
+  </Tab>
+
+  <Tab title="Optional Segments">
+    ```rust
+    #[resource(uri = "api:///{version}/data/{id}")]
+    async fn get_data(
+        &self,
+        version: String,  // e.g., "v1", "v2"
+        id: String,
+    ) -> Result<ResourceContents, ErrorData> {
+        // Version allows API evolution
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Testing Resources
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_file_resource() {
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        tokio::fs::write(&file_path, "Hello, World!").await.unwrap();
+
+        let server = FileServer::new(temp_dir.path().to_path_buf());
+
+        let content = server.read_file("test.txt".to_string()).await.unwrap();
+
+        assert_eq!(content.text(), Some("Hello, World!"));
+    }
+
+    #[tokio::test]
+    async fn test_directory_traversal_prevention() {
+        let temp_dir = tempdir().unwrap();
+        let server = FileServer::new(temp_dir.path().to_path_buf());
+
+        let result = server.read_file("../../../etc/passwd".to_string()).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("directory traversal"));
+    }
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Security">
+    Always validate resource URIs:
+
+    ```rust
+    // ✅ Good - validate paths
+    if !full_path.starts_with(&self.base_path) {
+        return Err(ErrorData::invalid_input("Invalid path"));
+    }
+
+    // ✅ Good - check existence
+    if !full_path.exists() {
+        return Err(ErrorData::not_found("Resource not found"));
+    }
+
+    // ❌ Bad - no validation
+    let contents = tokio::fs::read_to_string(path).await?;
+    ```
+  </Accordion>
+
+  <Accordion title="Performance">
+    Cache expensive resources:
+
+    ```rust
+    use moka::future::Cache;
+
+    #[derive(Clone)]
+    struct CachedResourceServer {
+        cache: Cache<String, ResourceContents>,
+        inner: ResourceServer,
+    }
+
+    async fn get_resource(&self, uri: String) -> Result<ResourceContents, ErrorData> {
+        if let Some(cached) = self.cache.get(&uri).await {
+            return Ok(cached);
+        }
+
+        let contents = self.inner.fetch(uri.clone()).await?;
+        self.cache.insert(uri, contents.clone()).await;
+        Ok(contents)
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Error Handling">
+    Provide helpful error messages:
+
+    ```rust
+    // ✅ Good - specific error
+    Err(ErrorData::not_found(format!("File '{}' not found", path)))
+
+    // ✅ Good - actionable message
+    Err(ErrorData::invalid_input(
+        "Path must be relative to base directory"
+    ))
+
+    // ❌ Bad - vague error
+    Err(ErrorData::internal("Error"))
+    ```
+  </Accordion>
+
+  <Accordion title="MIME Types">
+    Set appropriate MIME types:
+
+    ```rust
+    #[resource(mime_type = "text/plain")]       // Text files
+    #[resource(mime_type = "application/json")] // JSON data
+    #[resource(mime_type = "text/markdown")]    // Markdown
+    #[resource(mime_type = "image/png")]        // Images
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Common Patterns
+
+### Pagination
+
+```rust
+#[resource(uri = "api:///items?page={page}&limit={limit}")]
+async fn list_items(
+    &self,
+    page: Option<i64>,
+    limit: Option<i64>,
+) -> Result<ResourceContents, ErrorData> {
+    let page = page.unwrap_or(1);
+    let limit = limit.unwrap_or(100).min(1000); // Cap at 1000
+
+    let offset = (page - 1) * limit;
+
+    let items = self.db.query("SELECT * FROM items LIMIT $1 OFFSET $2")
+        .bind(limit)
+        .bind(offset)
+        .fetch_all()
+        .await?;
+
+    Ok(ResourceContents::json(&items)?)
+}
+```
+
+### Resource Metadata
+
+```rust
+#[resource(uri = "data:///{id}/meta")]
+async fn get_metadata(&self, id: String) -> Result<ResourceContents, ErrorData> {
+    let metadata = serde_json::json!({
+        "id": id,
+        "created_at": self.get_creation_time(&id).await?,
+        "size": self.get_size(&id).await?,
+        "checksum": self.calculate_checksum(&id).await?,
+    });
+
+    Ok(ResourceContents::text(serde_json::to_string_pretty(&metadata)?))
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Working with Prompts" icon="messages" href="/guides/working-with-prompts">
+    Learn about prompt templates
+  </Card>
+  <Card title="Tools Guide" icon="wrench" href="/concepts/tools">
+    Combine resources with tools
+  </Card>
+  <Card title="Testing Guide" icon="vial" href="/guides/testing">
+    Test your resources
+  </Card>
+  <Card title="Deployment" icon="rocket" href="/guides/deployment">
+    Deploy resource servers
+  </Card>
+</CardGroup>

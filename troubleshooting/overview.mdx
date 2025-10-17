@@ -1,0 +1,1245 @@
+---
+title: Troubleshooting Guide
+description: 'Common errors and solutions for Vulcan MCP SDK'
+---
+
+# Troubleshooting Guide
+
+Comprehensive solutions to common errors when building with Vulcan.
+
+## Compilation Errors
+
+### Tool functions must be async
+
+**Error:**
+```
+error: Tool functions must be async
+  --> src/main.rs:15:5
+   |
+15 |     fn my_tool(&self, param: String) -> Result<i32, ErrorData> {
+   |     ^^
+```
+
+**Cause:** Tool functions must use `async fn`.
+
+**Solution:**
+```rust
+// ❌ Wrong
+#[tool(description = "My tool")]
+fn my_tool(&self, param: String) -> Result<i32, ErrorData> { }
+
+// ✅ Correct
+#[tool(description = "My tool")]
+async fn my_tool(&self, param: String) -> Result<i32, ErrorData> { }
+```
+
+<Tip>
+All `#[tool]` functions MUST be `async fn`, even if they don't use `.await`.
+</Tip>
+
+---
+
+### The trait `IntoCallToolResult` is not implemented
+
+**Error:**
+```
+error[E0277]: the trait bound `MyType: IntoCallToolResult` is not satisfied
+  --> src/main.rs:20:45
+   |
+20 |     async fn my_tool(&self) -> Result<MyType, ErrorData> {
+   |                                       ^^^^^^ the trait `IntoCallToolResult` is not implemented for `MyType`
+```
+
+**Cause:** Return type must implement `Serialize`.
+
+**Solution:**
+```rust
+// Add Serialize derive
+#[derive(Serialize)]
+struct MyType {
+    field: String,
+}
+
+#[tool(description = "My tool")]
+async fn my_tool(&self) -> Result<MyType, ErrorData> {
+    Ok(MyType { field: "value".to_string() })
+}
+```
+
+---
+
+### Macro expansion error: unexpected token
+
+**Error:**
+```
+error: unexpected token: `!`
+  --> src/main.rs:25:1
+   |
+25 | #[tool_router]
+   | ^^^^^^^^^^^^^^
+```
+
+**Causes & Solutions:**
+
+<AccordionGroup>
+  <Accordion title="Missing impl block">
+    ```rust
+    // ❌ Wrong - applying to struct
+    #[tool_router]
+    struct MyServer {
+        router: ToolRouter<Self>,
+    }
+
+    // ✅ Correct - apply to impl block
+    struct MyServer {
+        router: ToolRouter<Self>,
+    }
+
+    #[tool_router]
+    impl MyServer {
+        #[tool(description = "My tool")]
+        async fn my_tool(&self) -> Result<i32, ErrorData> {
+            Ok(42)
+        }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Incorrect macro nesting">
+    ```rust
+    // ❌ Wrong - nesting #[tool] inside #[tool_router]
+    #[tool_router]
+    impl MyServer {
+        #[tool_router]  // Don't nest!
+        #[tool(description = "...")]
+        async fn my_tool(&self) -> Result<i32, ErrorData> { }
+    }
+
+    // ✅ Correct
+    #[tool_router]
+    impl MyServer {
+        #[tool(description = "...")]
+        async fn my_tool(&self) -> Result<i32, ErrorData> { }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Missing Clone derive">
+    ```rust
+    // ❌ Wrong - struct must implement Clone
+    struct MyServer {
+        router: ToolRouter<Self>,
+    }
+
+    // ✅ Correct
+    #[derive(Clone)]
+    struct MyServer {
+        router: ToolRouter<Self>,
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### Type inference failed
+
+**Error:**
+```
+error[E0282]: type annotations needed
+  --> src/main.rs:30:9
+   |
+30 |     let result = process_data(input).await?;
+   |         ^^^^^^ cannot infer type
+```
+
+**Cause:** Compiler can't determine return type.
+
+**Solution:**
+```rust
+// ❌ Ambiguous
+let result = serde_json::from_str(&data)?;
+
+// ✅ Explicit type annotation
+let result: MyStruct = serde_json::from_str(&data)?;
+
+// ✅ Or use turbofish
+let result = serde_json::from_str::<MyStruct>(&data)?;
+```
+
+---
+
+### Lifetime errors with tool parameters
+
+**Error:**
+```
+error[E0597]: `data` does not live long enough
+```
+
+**Cause:** Borrowing issues with parameters.
+
+**Solution:**
+```rust
+// ❌ Wrong - trying to return borrowed data
+#[tool(description = "Process")]
+async fn process(&self, data: &str) -> Result<&str, ErrorData> {
+    Ok(data)  // Lifetime error!
+}
+
+// ✅ Correct - return owned data
+#[tool(description = "Process")]
+async fn process(&self, data: String) -> Result<String, ErrorData> {
+    Ok(data)
+}
+
+// ✅ Or clone if needed
+#[tool(description = "Process")]
+async fn process(&self, data: String) -> Result<String, ErrorData> {
+    let processed = data.to_uppercase();
+    Ok(processed)
+}
+```
+
+---
+
+### Cannot find `Parameters` in this scope
+
+**Error:**
+```
+error[E0425]: cannot find value `Parameters` in this scope
+  --> src/main.rs:15:35
+   |
+15 |     async fn my_tool(&self, Parameters(input): Parameters<MyInput>) {
+   |                                         ^^^^^^^^^^^^^ not found in this scope
+```
+
+**Cause:** Using v0.x syntax in v1.0+ or missing import.
+
+**Solution (v1.0 - Recommended):**
+```rust
+// ✅ Use direct parameters (v1.0+)
+#[tool(description = "My tool")]
+async fn my_tool(&self, field1: String, field2: i32) -> Result<Output, ErrorData> {
+    // Access parameters directly
+    println!("{}, {}", field1, field2);
+    Ok(Output::default())
+}
+```
+
+**Solution (v0.x compatibility):**
+```rust
+use vulcan::handler::server::wrapper::Parameters;
+
+#[tool(description = "My tool")]
+async fn my_tool(&self, Parameters(input): Parameters<MyInput>)
+    -> Result<CallToolResult, ErrorData>
+{
+    // ...
+}
+```
+
+---
+
+## Runtime Errors
+
+### Division by zero / Panic in tool
+
+**Symptom:** Tool crashes the entire server.
+
+**Cause:** Unhandled panic in tool function.
+
+**Solution:**
+```rust
+#[tool(description = "Divide numbers")]
+async fn divide(&self, a: i32, b: i32) -> Result<i32, ErrorData> {
+    // ✅ Return error instead of panicking
+    if b == 0 {
+        return Err(ErrorData::invalid_input("Division by zero"));
+    }
+    Ok(a / b)
+}
+
+// ❌ Don't do this:
+// async fn divide(&self, a: i32, b: i32) -> Result<i32, ErrorData> {
+//     Ok(a / b)  // Panics if b == 0!
+// }
+```
+
+<Warning>
+Panics in tools can crash the server. Always validate inputs and return `Err` instead.
+</Warning>
+
+---
+
+### Serialization failed: invalid type
+
+**Error:**
+```
+Error: invalid type: map, expected unit
+```
+
+**Cause:** Mismatch between Rust type and JSON representation.
+
+**Common Scenarios:**
+
+<Tabs>
+  <Tab title="Enum Serialization">
+    ```rust
+    // ❌ Wrong - untagged enum ambiguous
+    #[derive(Serialize)]
+    enum Status {
+        Success(String),
+        Error(String),
+    }
+
+    // ✅ Correct - use tagged representation
+    #[derive(Serialize)]
+    #[serde(tag = "type", content = "data")]
+    enum Status {
+        Success(String),
+        Error(String),
+    }
+
+    // Or use external tagging
+    #[derive(Serialize)]
+    #[serde(tag = "type")]
+    enum Status {
+        Success { message: String },
+        Error { message: String },
+    }
+    ```
+  </Tab>
+
+  <Tab title="Unit Struct">
+    ```rust
+    // ❌ Wrong - unit struct serializes as null
+    #[derive(Serialize)]
+    struct Empty;
+
+    // ✅ Correct - use empty struct
+    #[derive(Serialize)]
+    struct Empty {}
+
+    // Or just use ()
+    #[tool(description = "No output")]
+    async fn no_output(&self) -> Result<(), ErrorData> {
+        Ok(())
+    }
+    ```
+  </Tab>
+
+  <Tab title="Option<T>">
+    ```rust
+    // ✅ Options work automatically
+    #[derive(Serialize)]
+    struct Response {
+        required: String,
+        optional: Option<String>,  // Serializes as null if None
+    }
+
+    // Use skip_serializing_if to omit null fields
+    #[derive(Serialize)]
+    struct Response {
+        required: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        optional: Option<String>,  // Field omitted if None
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+### `.await?` doesn't work with my error type
+
+**Error:**
+```
+error[E0277]: the trait bound `MyError: From<OtherError>` is not satisfied
+```
+
+**Cause:** Missing `From` impl for automatic error conversion.
+
+**Solution:**
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum MyError {
+    #[error("Database error: {0}")]
+    Database(#[from] sqlx::Error),  // Automatic From impl
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Custom: {0}")]
+    Custom(String),
+}
+
+// Add From impl for ErrorData
+impl From<MyError> for ErrorData {
+    fn from(error: MyError) -> Self {
+        match error {
+            MyError::Database(e) => ErrorData::internal(e),
+            MyError::Io(e) => ErrorData::internal(e),
+            MyError::Custom(msg) => ErrorData::internal(msg),
+        }
+    }
+}
+
+// Now .await? works!
+#[tool(description = "My tool")]
+async fn my_tool(&self) -> Result<Data, ErrorData> {
+    let result = my_operation().await?;  // ✅ Auto-converts MyError!
+    Ok(result)
+}
+```
+
+---
+
+### Transport disconnected unexpectedly
+
+**Symptom:** "Broken pipe" or "Connection reset by peer" errors.
+
+**Causes & Solutions:**
+
+<AccordionGroup>
+  <Accordion title="Client disconnected early">
+    **Cause:** Client closed connection before response sent.
+
+    **Detection:**
+    ```rust
+    use tokio::select;
+
+    #[tool(description = "Long operation")]
+    async fn long_operation(&self) -> Result<Data, ErrorData> {
+        // Check if client is still connected
+        select! {
+            result = expensive_operation() => {
+                Ok(result?)
+            }
+            _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                Err(ErrorData::internal("Operation timed out"))
+            }
+        }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Network timeout">
+    **Solution:** Use timeout middleware
+    ```rust
+    use vulcan::adapters::middleware::TimeoutMiddleware;
+
+    let mut chain = MiddlewareChain::new();
+    chain.add(Arc::new(TimeoutMiddleware::new(
+        Duration::from_secs(30)
+    )));
+    ```
+  </Accordion>
+
+  <Accordion title="Large response body">
+    **Cause:** Response too large for transport buffer.
+
+    **Solution:** Stream large responses or chunk data
+    ```rust
+    #[tool(description = "Get data")]
+    async fn get_data(&self) -> Result<Vec<String>, ErrorData> {
+        // ❌ Don't return huge single response
+        // let all_data = load_gb_of_data().await?;
+
+        // ✅ Return paginated/chunked data
+        let page_size = 100;
+        let data = load_data_page(0, page_size).await?;
+        Ok(data)
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### Server not found in Claude Desktop
+
+**Symptom:** Claude Desktop doesn't show your server.
+
+**Common Causes:**
+
+<AccordionGroup>
+  <Accordion title="1. Wrong Path">
+    **Check:** Is the path in `claude_desktop_config.json` correct?
+
+    ```json
+    {
+      "mcpServers": {
+        "my-server": {
+          "command": "/absolute/path/to/my-server"  // Must be absolute!
+        }
+      }
+    }
+    ```
+
+    **Verify:**
+    ```bash
+    # Run the exact path from config
+    /absolute/path/to/my-server
+
+    # If it doesn't run, fix the path
+    ```
+  </Accordion>
+
+  <Accordion title="2. Not Executable">
+    **Check:** Is the binary executable?
+
+    ```bash
+    # macOS/Linux
+    chmod +x /path/to/my-server
+    ls -l /path/to/my-server  # Should show 'x' permissions
+
+    # Windows: Check file properties, ensure it's .exe
+    ```
+  </Accordion>
+
+  <Accordion title="3. Missing Dependencies">
+    **Check:** Does your server have all runtime dependencies?
+
+    ```bash
+    # macOS/Linux: Check for missing libraries
+    ldd /path/to/my-server
+
+    # Windows: Use Dependency Walker
+    ```
+
+    **Fix:** Use static linking:
+    ```toml
+    # Cargo.toml
+    [profile.release]
+    target-feature = ["+crt-static"]
+    ```
+  </Accordion>
+
+  <Accordion title="4. Config Syntax Error">
+    **Check:** Is the JSON valid?
+
+    ```bash
+    # Validate JSON
+    cat ~/Library/Application\ Support/Claude/claude_desktop_config.json | jq .
+    ```
+
+    **Common mistakes:**
+    - Missing commas
+    - Trailing commas
+    - Unescaped backslashes (Windows paths: use `\\` or `/`)
+  </Accordion>
+
+  <Accordion title="5. Stdout/Stderr Pollution">
+    **Cause:** Print statements break stdio transport.
+
+    ```rust
+    // ❌ Wrong - breaks stdio protocol
+    println!("Debug info");
+    eprintln!("Error");
+
+    // ✅ Correct - use logging
+    tracing::debug!("Debug info");
+    tracing::error!("Error");
+    ```
+
+    **Setup logging:**
+    ```rust
+    // Log to file, not stdout/stderr
+    tracing_subscriber::fmt()
+        .with_writer(std::fs::File::create("server.log")?)
+        .init();
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### Connection pool exhausted
+
+**Symptom:** "Too many connections" or timeout errors.
+
+**Cause:** Not releasing connections or pool too small.
+
+**Solution:**
+```rust
+use sqlx::postgres::PgPoolOptions;
+
+// ✅ Configure connection pool properly
+let pool = PgPoolOptions::new()
+    .max_connections(20)      // Adjust based on load
+    .min_connections(5)
+    .acquire_timeout(Duration::from_secs(5))
+    .idle_timeout(Duration::from_secs(600))
+    .max_lifetime(Duration::from_secs(1800))
+    .connect(&database_url)
+    .await?;
+
+// ✅ Always use connection in scope
+#[tool(description = "Query database")]
+async fn query(&self, id: i64) -> Result<Data, ErrorData> {
+    let data = sqlx::query_as::<_, Data>("SELECT * FROM items WHERE id = $1")
+        .bind(id)
+        .fetch_one(&self.pool)  // Connection auto-returned after this
+        .await?;
+    Ok(data)
+}  // Connection released here
+```
+
+---
+
+## Performance Issues
+
+### Tools are slow
+
+**Symptom:** Tool execution takes several seconds.
+
+**Debug with timing:**
+```rust
+use std::time::Instant;
+use tracing::info;
+
+#[tool(description = "Slow tool")]
+async fn slow_tool(&self, input: String) -> Result<Data, ErrorData> {
+    let start = Instant::now();
+
+    let step1 = Instant::now();
+    let parsed = parse_input(&input).await?;
+    info!("Parse took: {:?}", step1.elapsed());
+
+    let step2 = Instant::now();
+    let processed = process_data(parsed).await?;
+    info!("Process took: {:?}", step2.elapsed());
+
+    let step3 = Instant::now();
+    let result = store_result(processed).await?;
+    info!("Store took: {:?}", step3.elapsed());
+
+    info!("Total time: {:?}", start.elapsed());
+    Ok(result)
+}
+```
+
+**Common causes & solutions:**
+
+<Tabs>
+  <Tab title="Blocking I/O">
+    ```rust
+    // ❌ Wrong - blocks async runtime
+    #[tool(description = "Read file")]
+    async fn read_file(&self, path: String) -> Result<String, ErrorData> {
+        let content = std::fs::read_to_string(&path)?;  // Blocks!
+        Ok(content)
+    }
+
+    // ✅ Correct - async I/O
+    #[tool(description = "Read file")]
+    async fn read_file(&self, path: String) -> Result<String, ErrorData> {
+        let content = tokio::fs::read_to_string(&path).await?;
+        Ok(content)
+    }
+    ```
+  </Tab>
+
+  <Tab title="No Timeout">
+    ```rust
+    // ❌ Wrong - can hang forever
+    let response = reqwest::get(url).await?;
+
+    // ✅ Correct - add timeout
+    use tokio::time::{timeout, Duration};
+
+    let response = timeout(
+        Duration::from_secs(10),
+        reqwest::get(url)
+    ).await
+        .map_err(|_| ErrorData::internal("Request timed out"))??;
+
+    // ✅ Or use TimeoutMiddleware globally
+    chain.add(Arc::new(TimeoutMiddleware::new(Duration::from_secs(10))));
+    ```
+  </Tab>
+
+  <Tab title="Expensive Computation">
+    ```rust
+    // ❌ Wrong - CPU-heavy work on async runtime
+    #[tool(description = "Process")]
+    async fn process(&self, data: Vec<u8>) -> Result<Vec<u8>, ErrorData> {
+        let result = expensive_cpu_work(data);  // Blocks async runtime!
+        Ok(result)
+    }
+
+    // ✅ Correct - use spawn_blocking for CPU work
+    #[tool(description = "Process")]
+    async fn process(&self, data: Vec<u8>) -> Result<Vec<u8>, ErrorData> {
+        let result = tokio::task::spawn_blocking(move || {
+            expensive_cpu_work(data)
+        }).await
+            .map_err(|e| ErrorData::internal(e))??;
+        Ok(result)
+    }
+    ```
+  </Tab>
+
+  <Tab title="No Caching">
+    ```rust
+    // ❌ Wrong - recompute every time
+    #[tool(description = "Get config")]
+    async fn get_config(&self) -> Result<Config, ErrorData> {
+        let config = load_from_disk().await?;  // Slow!
+        Ok(config)
+    }
+
+    // ✅ Correct - cache expensive operations
+    use moka::future::Cache;
+
+    struct MyServer {
+        config_cache: Cache<(), Config>,
+    }
+
+    #[tool(description = "Get config")]
+    async fn get_config(&self) -> Result<Config, ErrorData> {
+        let config = self.config_cache
+            .get_or_try_init((), async {
+                load_from_disk().await
+            })
+            .await?;
+        Ok(config)
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+### Memory usage keeps growing
+
+**Symptom:** Server memory increases over time.
+
+**Debug with memory profiling:**
+```rust
+// Use jemalloc for better profiling
+[dependencies]
+tikv-jemallocator = "0.5"
+
+// In main.rs
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+```
+
+**Common causes & solutions:**
+
+<AccordionGroup>
+  <Accordion title="Unbounded Cache">
+    ```rust
+    // ❌ Wrong - cache grows forever
+    use std::collections::HashMap;
+
+    struct MyServer {
+        cache: Arc<Mutex<HashMap<String, Data>>>,
+    }
+
+    // ✅ Correct - use bounded cache
+    use moka::future::Cache;
+
+    struct MyServer {
+        cache: Cache<String, Data>,
+    }
+
+    impl MyServer {
+        fn new() -> Self {
+            let cache = Cache::builder()
+                .max_capacity(1000)  // Limit entries
+                .time_to_live(Duration::from_secs(300))
+                .build();
+            Self { cache }
+        }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Leaked Arc References">
+    ```rust
+    // ❌ Wrong - circular references
+    struct Node {
+        data: String,
+        next: Option<Arc<Node>>,
+        prev: Option<Arc<Node>>,  // Circular!
+    }
+
+    // ✅ Correct - use Weak for back-references
+    struct Node {
+        data: String,
+        next: Option<Arc<Node>>,
+        prev: Option<Weak<Node>>,  // Weak reference
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Event Listeners Not Cleaned">
+    ```rust
+    // ✅ Implement Drop to clean up
+    struct MyServer {
+        shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl Drop for MyServer {
+        fn drop(&mut self) {
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(());  // Signal shutdown
+            }
+        }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Large Response Accumulation">
+    ```rust
+    // ❌ Wrong - accumulate large results
+    let mut all_results = Vec::new();
+    for item in items {
+        all_results.push(process(item).await?);
+    }
+
+    // ✅ Correct - stream or limit results
+    let results: Vec<_> = items
+        .into_iter()
+        .take(100)  // Limit results
+        .map(|item| process(item))
+        .collect();
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### High CPU usage when idle
+
+**Symptom:** Server uses CPU even with no requests.
+
+**Causes & Solutions:**
+
+```rust
+// ❌ Wrong - busy-wait loop
+loop {
+    if let Some(msg) = channel.try_recv() {
+        process(msg).await;
+    }
+    // Spins at 100% CPU!
+}
+
+// ✅ Correct - async wait
+loop {
+    if let Some(msg) = channel.recv().await {
+        process(msg).await;
+    } else {
+        break;
+    }
+}
+
+// ✅ Or use select! for multiple sources
+loop {
+    select! {
+        Some(msg) = channel.recv() => process(msg).await,
+        _ = shutdown_signal.recv() => break,
+    }
+}
+```
+
+---
+
+## Common Pitfalls
+
+### Deadlock with Arc<Mutex>
+
+**Symptom:** Server hangs completely.
+
+**Cause:** Two mutexes locked in different order.
+
+```rust
+// ❌ Wrong - deadlock potential
+async fn transfer(&self, from: usize, to: usize, amount: i64) {
+    let mut acc_from = self.accounts[from].lock().await;
+    let mut acc_to = self.accounts[to].lock().await;  // Deadlock if reverse order!
+
+    acc_from.balance -= amount;
+    acc_to.balance += amount;
+}
+
+// ✅ Correct - always lock in same order
+async fn transfer(&self, from: usize, to: usize, amount: i64) {
+    let (first, second) = if from < to {
+        (from, to)
+    } else {
+        (to, from)
+    };
+
+    let mut acc_first = self.accounts[first].lock().await;
+    let mut acc_second = self.accounts[second].lock().await;
+
+    // Now safe to transfer
+}
+
+// ✅ Better - use a single lock for related data
+struct Accounts {
+    balances: Arc<Mutex<HashMap<usize, i64>>>,
+}
+```
+
+---
+
+### Holding mutex across .await
+
+**Symptom:** Poor concurrency, potential deadlocks.
+
+**Problem:**
+```rust
+// ❌ Wrong - holds lock across await
+#[tool(description = "Update")]
+async fn update(&self, id: i64, data: String) -> Result<(), ErrorData> {
+    let mut state = self.state.lock().await;
+    state.insert(id, data.clone());
+
+    // Lock held during network call!
+    self.notify_update(id, data).await?;
+
+    Ok(())
+}
+
+// ✅ Correct - release lock before await
+#[tool(description = "Update")]
+async fn update(&self, id: i64, data: String) -> Result<(), ErrorData> {
+    {
+        let mut state = self.state.lock().await;
+        state.insert(id, data.clone());
+    }  // Lock released here
+
+    // Now safe to await
+    self.notify_update(id, data).await?;
+
+    Ok(())
+}
+```
+
+---
+
+### Forgetting to .await
+
+**Symptom:** Code compiles but doesn't execute.
+
+```rust
+// ❌ Wrong - future not awaited
+#[tool(description = "Process")]
+async fn process(&self, data: String) -> Result<(), ErrorData> {
+    expensive_operation(data);  // Returns Future, but doesn't run!
+    Ok(())
+}
+
+// ✅ Correct - await the future
+#[tool(description = "Process")]
+async fn process(&self, data: String) -> Result<(), ErrorData> {
+    expensive_operation(data).await?;
+    Ok(())
+}
+```
+
+<Warning>
+Rust won't warn about unawaited futures in some cases. Use `#[must_use]` on your async functions.
+</Warning>
+
+---
+
+### Clone vs Arc confusion
+
+**Symptom:** Performance issues or borrow checker errors.
+
+```rust
+// ❌ Expensive - clones entire data
+#[derive(Clone)]
+struct LargeData {
+    content: Vec<u8>,  // Cloned every time!
+}
+
+async fn process(data: LargeData) {
+    // Cloning is expensive
+}
+
+// ✅ Cheap - Arc just increments counter
+struct LargeData {
+    content: Arc<Vec<u8>>,  // Cloning Arc is cheap
+}
+
+async fn process(data: LargeData) {
+    // Arc clone is O(1)
+}
+```
+
+---
+
+## Testing Issues
+
+### Tests hang forever
+
+**Symptom:** `cargo test` never completes.
+
+**Solutions:**
+
+```rust
+// ✅ Add timeout to tests
+use tokio::time::{timeout, Duration};
+
+#[tokio::test]
+async fn test_my_tool() {
+    timeout(Duration::from_secs(5), async {
+        let result = my_tool().await;
+        assert!(result.is_ok());
+    }).await.expect("Test timed out");
+}
+
+// ✅ Use #[tokio::test] with flavor
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_concurrent() {
+    // Test code
+}
+
+// ✅ Debug with RUST_LOG
+// RUST_LOG=debug cargo test -- --nocapture
+```
+
+**Check for:**
+- Missing `.await`
+- Deadlocks (mutexes locked in different order)
+- Infinite loops
+- Channels with no receiver
+
+---
+
+### Tests pass individually but fail when run together
+
+**Cause:** Shared mutable state or port conflicts.
+
+**Solutions:**
+
+```rust
+// ✅ Use random ports for HTTP tests
+use std::net::TcpListener;
+
+fn get_available_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+#[tokio::test]
+async fn test_http_server() {
+    let port = get_available_port();
+    let addr = format!("127.0.0.1:{}", port);
+    // Now no port conflicts
+}
+
+// ✅ Use test-specific state
+#[tokio::test]
+async fn test_with_isolated_state() {
+    let server = MyServer::new_test();  // Isolated instance
+    // Test code
+}
+```
+
+---
+
+## Deployment Issues
+
+### Binary size too large
+
+**Symptom:** Release binary is > 50MB.
+
+**Solutions:**
+
+```toml
+# Cargo.toml
+[profile.release]
+opt-level = "z"       # Optimize for size
+lto = true            # Link-time optimization
+codegen-units = 1     # Better optimization
+strip = true          # Remove debug symbols
+panic = "abort"       # Smaller binary
+
+# Further reduction:
+[dependencies]
+# Only enable features you need
+vulcan = { version = "1.0", default-features = false, features = ["server", "transport-io"] }
+```
+
+**Results:**
+- Before: ~52MB
+- After: ~8MB (84% reduction)
+
+---
+
+### Can't connect to server over HTTP
+
+**Symptom:** Client gets connection refused.
+
+**Debugging checklist:**
+
+<Steps>
+  <Step title="Check Server Is Running">
+    ```bash
+    # Verify process is running
+    ps aux | grep my-server
+
+    # Check listening ports
+    netstat -an | grep :8080
+    ```
+  </Step>
+
+  <Step title="Check Bind Address">
+    ```rust
+    // ❌ Wrong - only localhost
+    let addr = "127.0.0.1:8080".parse()?;
+
+    // ✅ Correct - all interfaces
+    let addr = "0.0.0.0:8080".parse()?;
+    ```
+  </Step>
+
+  <Step title="Check Firewall">
+    ```bash
+    # macOS
+    sudo pfctl -s rules | grep 8080
+
+    # Linux
+    sudo iptables -L -n | grep 8080
+
+    # Windows
+    netsh advfirewall firewall show rule name=all | findstr 8080
+    ```
+  </Step>
+
+  <Step title="Enable CORS (if web client)">
+    ```rust
+    use tower_http::cors::CorsLayer;
+
+    let app = Router::new()
+        .route("/mcp", post(handler))
+        .layer(CorsLayer::permissive());
+    ```
+  </Step>
+
+  <Step title="Check Logs">
+    ```bash
+    RUST_LOG=debug ./my-server
+    ```
+  </Step>
+</Steps>
+
+---
+
+### Certificate errors with HTTPS
+
+**Symptom:** "SSL certificate problem" or "certificate verify failed".
+
+**Solutions:**
+
+```rust
+// For development only - disable verification
+let client = reqwest::Client::builder()
+    .danger_accept_invalid_certs(true)  // ⚠️ Dev only!
+    .build()?;
+
+// For production - use proper certificates
+let client = reqwest::Client::builder()
+    .add_root_certificate(cert)
+    .build()?;
+
+// Or use system certificates
+let client = reqwest::Client::builder()
+    .use_rustls_tls()  // Uses system certificates
+    .build()?;
+```
+
+---
+
+## Getting Help
+
+<CardGroup cols={2}>
+  <Card title="GitHub Issues" icon="github" href="https://github.com/your-org/vulcan-mcp-sdk/issues">
+    Report bugs or ask questions
+  </Card>
+  <Card title="Discord" icon="discord" href="https://discord.gg/vulcan">
+    Join the community
+  </Card>
+  <Card title="Examples" icon="code" href="/examples-docs/counter-server">
+    See working examples
+  </Card>
+  <Card title="Guides" icon="book" href="/guides/building-server">
+    Read comprehensive guides
+  </Card>
+</CardGroup>
+
+## Debug Checklist
+
+When something doesn't work, follow this systematic approach:
+
+<Steps>
+  <Step title="Check Compilation">
+    ```bash
+    cargo build --all-features
+    ```
+    Fix any compilation errors first.
+  </Step>
+
+  <Step title="Enable Logging">
+    ```bash
+    RUST_LOG=debug cargo run
+    ```
+    See what's happening at runtime.
+  </Step>
+
+  <Step title="Test in Isolation">
+    ```rust
+    #[tokio::test]
+    async fn test_specific_tool() {
+        // Test just the failing tool
+    }
+    ```
+  </Step>
+
+  <Step title="Check Documentation">
+    Search this documentation for error messages or symptoms.
+  </Step>
+
+  <Step title="Simplify">
+    Create a minimal reproduction:
+    - Remove middleware
+    - Test with one tool
+    - Use stdio transport
+    - Remove async operations
+  </Step>
+
+  <Step title="Ask for Help">
+    If still stuck, create a GitHub issue with:
+    - Error message (full stack trace)
+    - Minimal reproduction code
+    - Rust version (`rustc --version`)
+    - Vulcan version
+    - What you've tried
+  </Step>
+</Steps>
+
+## Quick Reference
+
+**Most Common Errors:**
+1. ❌ Forgot `async fn` → Add `async` keyword
+2. ❌ Missing `Serialize` → Add `#[derive(Serialize)]`
+3. ❌ Wrong parameter syntax → Use direct parameters in v1.0+
+4. ❌ Blocking I/O → Use `tokio::fs` instead of `std::fs`
+5. ❌ Missing error conversion → Implement `From<MyError> for ErrorData`
+6. ❌ Holding lock across `.await` → Release lock before await
+7. ❌ Forgot `.await` → Add `.await?` to async operations
+8. ❌ Unbounded cache → Use `moka` with `max_capacity`
+9. ❌ Wrong bind address → Use `0.0.0.0:port` not `127.0.0.1:port`
+10. ❌ Stdout pollution → Use file logging, not `println!` with stdio transport

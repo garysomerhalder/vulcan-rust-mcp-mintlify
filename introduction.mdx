@@ -1,0 +1,173 @@
+---
+title: Introduction
+description: 'Vulcan: Zero-Boilerplate Rust SDK for the Model Context Protocol'
+---
+
+# Welcome to Vulcan
+
+**Vulcan** is the official Rust SDK for the [Model Context Protocol (MCP)](https://modelcontextprotocol.io), designed with one goal: **zero boilerplate**.
+
+Build powerful MCP servers and clients in Rust with minimal ceremony and maximum ergonomics.
+
+## What is MCP?
+
+The **Model Context Protocol** is an open protocol that standardizes how AI assistants like Claude Desktop and Cursor IDE communicate with external services. MCP enables:
+
+- **Tools**: AI-callable functions that perform actions
+- **Resources**: Data sources that provide context to AI
+- **Prompts**: Template-driven interaction patterns
+
+## Why Vulcan?
+
+<CardGroup cols={2}>
+  <Card title="Zero Boilerplate" icon="wand-magic-sparkles">
+    Write tools as simple async functions. Macros handle all protocol details.
+  </Card>
+  <Card title="Type-Safe" icon="shield-check">
+    Full Rust type safety with compile-time validation and ergonomic error handling.
+  </Card>
+  <Card title="Production-Ready" icon="rocket">
+    Built with DDD + Hexagonal Architecture. Middleware for logging, metrics, retry, timeout.
+  </Card>
+  <Card title="Extensible" icon="puzzle-piece">
+    Pluggable transports (stdio, HTTP, SSE), middleware system, and adapter pattern.
+  </Card>
+</CardGroup>
+
+## Quick Example
+
+Here's a complete MCP server in ~20 lines:
+
+```rust
+use vulcan::{tool, tool_router, ServerHandler, model::*, ErrorData};
+use vulcan::handler::server::tool::ToolRouter;
+
+#[derive(Clone)]
+struct Calculator {
+    tool_router: ToolRouter<Self>,
+}
+
+#[tool_router]
+impl Calculator {
+    fn new() -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    #[tool(description = "Add two numbers")]
+    async fn add(&self, a: i32, b: i32) -> Result<i32, ErrorData> {
+        Ok(a + b)
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for Calculator {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+            ..Default::default()
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use vulcan::service::ServiceExt;
+    Calculator::new().serve((tokio::io::stdin(), tokio::io::stdout())).await?;
+    Ok(())
+}
+```
+
+That's it! No manual JSON-RPC handling, no schema generation, no boilerplate.
+
+## Architecture Highlights
+
+Vulcan is built with **Domain-Driven Design + Hexagonal Architecture**:
+
+- **Domain Layer**: Pure business logic (Tool, Resource, Prompt entities)
+- **Ports Layer**: Trait boundaries (Middleware, Transport, EventPublisher)
+- **Adapters Layer**: Infrastructure (LoggingMiddleware, SSE transport, MetricsMiddleware)
+
+This architecture ensures:
+- Clean separation of concerns
+- Testability without mocks
+- Easy extension with custom middleware
+- Swappable transports (stdio, HTTP, SSE, WebSocket)
+
+## Key Features
+
+### Direct Parameters (No Wrappers!)
+
+```rust
+// ✅ Just use your types directly
+#[tool(description = "Create user")]
+async fn create_user(&self, name: String, age: Option<i32>)
+    -> Result<User, ErrorData>
+{
+    // Optional parameters auto-detected from Option<T>!
+    Ok(User { name, age: age.unwrap_or(18) })
+}
+```
+
+### Auto-Serialization
+
+```rust
+// ✅ Return your types, Vulcan handles serialization
+#[derive(Serialize, JsonSchema)]
+struct CalculationResult {
+    result: i32,
+    operation: String,
+}
+
+#[tool(description = "Calculate")]
+async fn calculate(&self, a: i32, b: i32) -> Result<CalculationResult, ErrorData> {
+    Ok(CalculationResult {
+        result: a + b,
+        operation: "add".into()
+    })
+}
+```
+
+### Middleware System
+
+```rust
+use vulcan::adapters::{LoggingMiddleware, MetricsMiddleware, RetryMiddleware};
+use vulcan::ports::MiddlewareChain;
+
+let mut chain = MiddlewareChain::new();
+chain.add(Arc::new(LoggingMiddleware::new()));
+chain.add(Arc::new(MetricsMiddleware::new()));
+chain.add(Arc::new(RetryMiddleware::new(3)));
+
+// Middleware wraps all tool executions automatically
+```
+
+## What's Next?
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="bolt" href="/quickstart">
+    Build your first MCP server in 5 minutes
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/concepts/overview">
+    Understand tools, resources, and transports
+  </Card>
+  <Card title="API Reference" icon="code" href="/api-reference/introduction">
+    Explore the full API documentation
+  </Card>
+  <Card title="Examples" icon="flask" href="/examples/overview">
+    See complete server implementations
+  </Card>
+</CardGroup>
+
+## Community
+
+- **GitHub**: [anthropics/rust-vulcan-mcp-sdk](https://github.com/anthropics/rust-vulcan-mcp-sdk)
+- **Crates.io**: [vulcan](https://crates.io/crates/vulcan)
+- **Discord**: [Join the community](https://discord.gg/vulcan)
+
+## License
+
+Vulcan is open source under the MIT License.

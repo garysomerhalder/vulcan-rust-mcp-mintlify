@@ -1,0 +1,116 @@
+{
+  "$schema": "https://mintlify.com/schema.json",
+  "name": "Vulcan MCP SDK",
+  "logo": {
+    "dark": "/logo/dark.svg",
+    "light": "/logo/light.svg"
+  },
+  "favicon": "/favicon.svg",
+  "colors": {
+    "primary": "#FF6B35",
+    "light": "#FFB088",
+    "dark": "#D63000",
+    "background": {
+      "dark": "#0F0F0F"
+    },
+    "anchors": {
+      "from": "#FF6B35",
+      "to": "#FFB088"
+    }
+  },
+  "topbarLinks": [
+    {
+      "name": "Support",
+      "url": "mailto:support@vulcan.dev"
+    }
+  ],
+  "topbarCtaButton": {
+    "name": "GitHub",
+    "url": "https://github.com/your-org/vulcan-mcp-sdk"
+  },
+  "anchors": [
+    {
+      "name": "Documentation",
+      "icon": "book-open-cover",
+      "url": "https://docs.rs/vulcan"
+    },
+    {
+      "name": "Community",
+      "icon": "discord",
+      "url": "https://discord.gg/vulcan"
+    },
+    {
+      "name": "Crates.io",
+      "icon": "rust",
+      "url": "https://crates.io/crates/vulcan"
+    }
+  ],
+  "navigation": [
+    {
+      "group": "Get Started",
+      "pages": [
+        "introduction",
+        "quickstart",
+        "installation"
+      ]
+    },
+    {
+      "group": "Guides",
+      "pages": [
+        "guides/building-server",
+        "guides/building-client",
+        "guides/working-with-resources",
+        "guides/working-with-prompts",
+        "guides/error-handling",
+        "guides/testing",
+        "guides/deployment",
+        "guides/advanced-patterns"
+      ]
+    },
+    {
+      "group": "Examples",
+      "pages": [
+        "examples-docs/overview",
+        "examples-docs/counter-server",
+        "examples-docs/middleware",
+        "examples-docs/ports-adapters",
+        "examples-docs/oauth",
+        "examples-docs/database-integration"
+      ]
+    },
+    {
+      "group": "Architecture",
+      "pages": [
+        "architecture/overview"
+      ]
+    },
+    {
+      "group": "Core Concepts",
+      "pages": [
+        "concepts/overview",
+        "concepts/tools",
+        "concepts/middleware",
+        "concepts/transports",
+        "concepts/transport-selection",
+        "concepts/resources",
+        "concepts/prompts"
+      ]
+    },
+    {
+      "group": "Troubleshooting",
+      "pages": [
+        "troubleshooting/overview"
+      ]
+    }
+  ],
+  "footerSocials": {
+    "github": "https://github.com/your-org/vulcan-mcp-sdk",
+    "discord": "https://discord.gg/vulcan",
+    "twitter": "https://twitter.com/vulcan_mcp"
+  },
+  "feedback": {
+    "thumbsRating": true,
+    "suggestEdit": true,
+    "raiseIssue": true
+  }
+}

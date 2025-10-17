@@ -1,0 +1,679 @@
+---
+title: Error Handling
+description: 'Master error handling patterns in Vulcan MCP SDK'
+---
+
+# Error Handling
+
+Learn how to handle errors ergonomically in Vulcan with automatic conversions, custom error types, and best practices.
+
+## Overview
+
+Vulcan provides **ergonomic error handling** that eliminates boilerplate:
+
+<CardGroup cols={2}>
+  <Card title="Automatic Conversion" icon="wand-magic-sparkles">
+    Built-in `From` impls for common error types
+  </Card>
+  <Card title="Custom Errors" icon="code">
+    Add your own error types with simple `From` impls
+  </Card>
+  <Card title="Error Constructors" icon="hammer">
+    Concise constructors for common error scenarios
+  </Card>
+  <Card title="Type Safety" icon="shield">
+    Compile-time guarantees with Result types
+  </Card>
+</CardGroup>
+
+## The `ErrorData` Type
+
+All Vulcan errors use the `ErrorData` type from the MCP specification:
+
+```rust
+pub struct ErrorData {
+    pub code: i32,
+    pub message: String,
+    pub data: Option<serde_json::Value>,
+}
+```
+
+**Error codes follow JSON-RPC 2.0:**
+- `-32700`: Parse error
+- `-32600`: Invalid request
+- `-32601`: Method not found
+- `-32602`: Invalid params
+- `-32603`: Internal error
+- `-32000 to -32099`: Server error range
+
+## Built-in Error Conversions
+
+Vulcan provides automatic `From` impls for common error types:
+
+### serde_json::Error
+
+```rust
+#[tool(description = "Parse JSON")]
+async fn parse_json(&self, data: String) -> Result<MyStruct, ErrorData> {
+    let parsed: MyStruct = serde_json::from_str(&data)?;  // ✅ Just works!
+    Ok(parsed)
+}
+```
+
+### `Box<dyn Error + Send + Sync>`
+
+```rust
+#[tool(description = "Fetch data")]
+async fn fetch(&self, url: String) -> Result<String, ErrorData> {
+    let response = reqwest::get(&url).await?;  // ✅ Auto-converts!
+    let text = response.text().await?;
+    Ok(text)
+}
+```
+
+<Tip>
+These conversions mean you can use `.await?` without manual error mapping in most cases!
+</Tip>
+
+## Error Constructors
+
+Vulcan provides concise constructors for common error scenarios:
+
+<Tabs>
+  <Tab title="Internal Error">
+    **For server-side errors** (500-equivalent):
+
+    ```rust
+    use vulcan::ErrorData;
+
+    // From error type that implements Display
+    let err = ErrorData::internal(io_error);
+
+    // From string message
+    let err = ErrorData::internal("Database connection failed");
+
+    // From format string
+    let err = ErrorData::internal(format!("Failed to connect to {}", host));
+    ```
+
+    **Maps to:** Error code `-32603` (Internal error)
+  </Tab>
+
+  <Tab title="Invalid Input">
+    **For validation errors** (400-equivalent):
+
+    ```rust
+    // String message
+    let err = ErrorData::invalid_input("Age must be positive");
+
+    // Format string
+    let err = ErrorData::invalid_input(
+        format!("Invalid email format: {}", email)
+    );
+    ```
+
+    **Maps to:** Error code `-32602` (Invalid params)
+  </Tab>
+
+  <Tab title="Not Found">
+    **For missing resources** (404-equivalent):
+
+    ```rust
+    // String message
+    let err = ErrorData::not_found("User not found");
+
+    // Format string
+    let err = ErrorData::not_found(
+        format!("Resource {} does not exist", id)
+    );
+    ```
+
+    **Maps to:** Error code `-32001` (Server error - not found)
+  </Tab>
+
+  <Tab title="Legacy Constructor">
+    **Old verbose form** (avoid in new code):
+
+    ```rust
+    // ❌ Verbose - avoid
+    let err = ErrorData::internal_error(
+        format!("Failed: {}", e),
+        None  // Optional data field
+    );
+
+    // ✅ Use concise form instead
+    let err = ErrorData::internal(format!("Failed: {}", e));
+    ```
+  </Tab>
+</Tabs>
+
+## Custom Error Types
+
+Add ergonomic error handling for your domain errors with a simple `From` impl:
+
+### Basic Custom Error
+
+```rust
+use thiserror::Error;
+use vulcan::ErrorData;
+
+#[derive(Error, Debug)]
+pub enum MyError {
+    #[error("Database error: {0}")]
+    Database(String),
+
+    #[error("Validation error: {0}")]
+    Validation(String),
+
+    #[error("Not found: {0}")]
+    NotFound(String),
+}
+
+// Add From impl (3 lines, one time!)
+impl From<MyError> for ErrorData {
+    fn from(error: MyError) -> Self {
+        match error {
+            MyError::Database(msg) => ErrorData::internal(msg),
+            MyError::Validation(msg) => ErrorData::invalid_input(msg),
+            MyError::NotFound(msg) => ErrorData::not_found(msg),
+        }
+    }
+}
+
+// Now use .await? everywhere!
+#[tool(description = "Get user")]
+async fn get_user(&self, id: i64) -> Result<User, ErrorData> {
+    let user = self.db.get_user(id).await?;  // MyError auto-converts!
+    Ok(user)
+}
+```
+
+### With thiserror
+
+`thiserror` provides excellent error ergonomics:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum AppError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Parse error: {0}")]
+    Parse(#[from] serde_json::Error),
+
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    #[error("Custom: {0}")]
+    Custom(String),
+}
+
+impl From<AppError> for ErrorData {
+    fn from(error: AppError) -> Self {
+        ErrorData::internal(error)
+    }
+}
+
+// Now all these errors auto-convert!
+#[tool(description = "Complex operation")]
+async fn complex_operation(&self) -> Result<Data, ErrorData> {
+    let file = tokio::fs::read_to_string("data.json").await?;  // IO error
+    let parsed: RawData = serde_json::from_str(&file)?;  // Parse error
+    let response = reqwest::get("https://api.example.com").await?;  // HTTP error
+
+    if parsed.is_invalid() {
+        return Err(AppError::Custom("Invalid data".into()).into());
+    }
+
+    Ok(process(parsed))
+}
+```
+
+### Error Context with anyhow
+
+For rapid development, use `anyhow` for context:
+
+```rust
+use anyhow::{Context, Result};
+
+async fn load_config(path: &str) -> Result<Config> {
+    let file = tokio::fs::read_to_string(path).await
+        .context("Failed to read config file")?;
+
+    let config: Config = serde_json::from_str(&file)
+        .context("Failed to parse config JSON")?;
+
+    Ok(config)
+}
+
+// Convert anyhow::Error to ErrorData
+impl From<anyhow::Error> for ErrorData {
+    fn from(error: anyhow::Error) -> Self {
+        ErrorData::internal(format!("{:#}", error))
+    }
+}
+
+#[tool(description = "Load configuration")]
+async fn load_config_tool(&self, path: String) -> Result<Config, ErrorData> {
+    load_config(&path).await.map_err(Into::into)
+}
+```
+
+## Error Handling Patterns
+
+### Validation Pattern
+
+```rust
+#[tool(description = "Create user")]
+async fn create_user(&self, name: String, age: i32) -> Result<User, ErrorData> {
+    // Validate inputs
+    if name.is_empty() {
+        return Err(ErrorData::invalid_input("Name cannot be empty"));
+    }
+
+    if age < 0 || age > 150 {
+        return Err(ErrorData::invalid_input(
+            format!("Invalid age: {}", age)
+        ));
+    }
+
+    // Create user
+    let user = User { name, age };
+    self.db.insert(user.clone()).await?;
+
+    Ok(user)
+}
+```
+
+### Option to Result Pattern
+
+Convert `Option` to `ErrorData` with `.ok_or_else()`:
+
+```rust
+#[tool(description = "Get user by ID")]
+async fn get_user(&self, id: i64) -> Result<User, ErrorData> {
+    let users = self.users.read().await;
+
+    users.get(&id)
+        .cloned()
+        .ok_or_else(|| ErrorData::not_found(format!("User {} not found", id)))
+}
+```
+
+### Fallback on Error
+
+```rust
+#[tool(description = "Get value with default")]
+async fn get_with_default(&self, key: String, default: String)
+    -> Result<String, ErrorData>
+{
+    match self.cache.get(&key).await {
+        Ok(value) => Ok(value),
+        Err(_) => Ok(default),  // Fallback to default
+    }
+}
+```
+
+### Error Propagation with Context
+
+```rust
+#[tool(description = "Process file")]
+async fn process_file(&self, path: String) -> Result<ProcessedData, ErrorData> {
+    // Read file
+    let content = tokio::fs::read_to_string(&path).await
+        .map_err(|e| ErrorData::internal(
+            format!("Failed to read {}: {}", path, e)
+        ))?;
+
+    // Parse
+    let data: RawData = serde_json::from_str(&content)
+        .map_err(|e| ErrorData::invalid_input(
+            format!("Invalid JSON in {}: {}", path, e)
+        ))?;
+
+    // Process
+    let processed = self.process(data).await
+        .map_err(|e| ErrorData::internal(
+            format!("Processing failed: {}", e)
+        ))?;
+
+    Ok(processed)
+}
+```
+
+### Collecting Multiple Errors
+
+```rust
+#[derive(serde::Serialize)]
+struct ValidationResult {
+    valid: bool,
+    errors: Vec<String>,
+}
+
+#[tool(description = "Validate data")]
+async fn validate(&self, data: MyData) -> Result<ValidationResult, ErrorData> {
+    let mut errors = Vec::new();
+
+    if data.name.is_empty() {
+        errors.push("Name is required".to_string());
+    }
+
+    if data.age < 0 {
+        errors.push("Age must be positive".to_string());
+    }
+
+    if data.email.is_empty() {
+        errors.push("Email is required".to_string());
+    }
+
+    Ok(ValidationResult {
+        valid: errors.is_empty(),
+        errors,
+    })
+}
+```
+
+## Error Recovery
+
+### Retry Pattern
+
+```rust
+use tokio::time::{sleep, Duration};
+
+async fn call_with_retry<F, T>(
+    operation: F,
+    max_retries: usize,
+) -> Result<T, ErrorData>
+where
+    F: Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, ErrorData>>>>,
+{
+    let mut attempts = 0;
+
+    loop {
+        match operation().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                attempts += 1;
+                if attempts >= max_retries {
+                    return Err(ErrorData::internal(
+                        format!("Failed after {} retries: {}", max_retries, e.message)
+                    ));
+                }
+                sleep(Duration::from_millis(100 * attempts as u64)).await;
+            }
+        }
+    }
+}
+
+#[tool(description = "Fetch with retry")]
+async fn fetch_with_retry(&self, url: String) -> Result<String, ErrorData> {
+    call_with_retry(
+        || Box::pin(async { self.fetch(&url).await }),
+        3
+    ).await
+}
+```
+
+### Circuit Breaker Pattern
+
+```rust
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+struct CircuitBreaker {
+    failures: Arc<AtomicUsize>,
+    threshold: usize,
+}
+
+impl CircuitBreaker {
+    fn new(threshold: usize) -> Self {
+        Self {
+            failures: Arc::new(AtomicUsize::new(0)),
+            threshold,
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        self.failures.load(Ordering::Relaxed) >= self.threshold
+    }
+
+    fn record_success(&self) {
+        self.failures.store(0, Ordering::Relaxed);
+    }
+
+    fn record_failure(&self) {
+        self.failures.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[tool(description = "Call with circuit breaker")]
+async fn call_protected(&self, id: String) -> Result<Data, ErrorData> {
+    if self.circuit_breaker.is_open() {
+        return Err(ErrorData::internal(
+            "Circuit breaker is open - too many failures"
+        ));
+    }
+
+    match self.external_api.call(&id).await {
+        Ok(data) => {
+            self.circuit_breaker.record_success();
+            Ok(data)
+        }
+        Err(e) => {
+            self.circuit_breaker.record_failure();
+            Err(e)
+        }
+    }
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Specific Error Constructors">
+    Choose the right constructor for better error semantics:
+
+    ```rust
+    // ✅ Good - semantic error types
+    if user_id < 0 {
+        return Err(ErrorData::invalid_input("User ID must be positive"));
+    }
+
+    match db.get(user_id).await {
+        Some(user) => Ok(user),
+        None => Err(ErrorData::not_found(format!("User {} not found", user_id))),
+    }
+
+    // ❌ Bad - generic internal error for everything
+    if user_id < 0 {
+        return Err(ErrorData::internal("Bad user ID"));
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Add Context to Errors">
+    Include relevant information in error messages:
+
+    ```rust
+    // ✅ Good - contextual error message
+    let file = tokio::fs::read_to_string(&path).await
+        .map_err(|e| ErrorData::internal(
+            format!("Failed to read config file '{}': {}", path, e)
+        ))?;
+
+    // ❌ Bad - vague error message
+    let file = tokio::fs::read_to_string(&path).await
+        .map_err(|e| ErrorData::internal("File read failed"))?;
+    ```
+  </Accordion>
+
+  <Accordion title="Don't Swallow Errors">
+    Propagate errors unless you have a good reason not to:
+
+    ```rust
+    // ✅ Good - propagate error
+    #[tool(description = "Process data")]
+    async fn process(&self, data: String) -> Result<ProcessedData, ErrorData> {
+        let parsed = self.parse(&data).await?;
+        let validated = self.validate(parsed).await?;
+        self.store(validated).await
+    }
+
+    // ❌ Bad - silently ignoring errors
+    #[tool(description = "Process data")]
+    async fn process(&self, data: String) -> Result<ProcessedData, ErrorData> {
+        let parsed = match self.parse(&data).await {
+            Ok(p) => p,
+            Err(_) => return Ok(ProcessedData::default()),  // Silent failure!
+        };
+        // ...
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Validate Early">
+    Validate inputs at the start of your function:
+
+    ```rust
+    #[tool(description = "Update user")]
+    async fn update_user(&self, id: i64, name: String, age: i32)
+        -> Result<User, ErrorData>
+    {
+        // ✅ Validate all inputs first
+        if id < 0 {
+            return Err(ErrorData::invalid_input("ID must be positive"));
+        }
+        if name.is_empty() {
+            return Err(ErrorData::invalid_input("Name cannot be empty"));
+        }
+        if age < 0 || age > 150 {
+            return Err(ErrorData::invalid_input("Age out of range"));
+        }
+
+        // Then proceed with business logic
+        let user = self.db.update(id, name, age).await?;
+        Ok(user)
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Debugging Errors
+
+### Enable Logging
+
+Use `tracing` or `log` to track errors:
+
+```rust
+use tracing::{error, warn};
+
+#[tool(description = "Risky operation")]
+async fn risky_operation(&self, data: String) -> Result<Data, ErrorData> {
+    match self.process(&data).await {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            error!("Operation failed for data '{}': {}", data, e.message);
+            Err(e)
+        }
+    }
+}
+```
+
+### Error Middleware
+
+Track errors globally with middleware:
+
+```rust
+use vulcan::{ports::Middleware, domain::Tool, ErrorData, ports::MiddlewareContext};
+
+pub struct ErrorTrackingMiddleware {
+    errors: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl Middleware for ErrorTrackingMiddleware {
+    async fn on_error(
+        &self,
+        tool: &Tool,
+        _params: &serde_json::Value,
+        error: &ErrorData,
+        context: &MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        let error_msg = format!(
+            "[{}] Tool '{}' failed: {}",
+            context.correlation_id,
+            tool.name(),
+            error.message
+        );
+
+        eprintln!("{}", error_msg);
+        self.errors.lock().await.push(error_msg);
+
+        Ok(())
+    }
+
+    // ... other methods ...
+}
+```
+
+## Testing Error Scenarios
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_validation_error() {
+        let server = MyServer::new();
+
+        let result = server.create_user("".to_string(), 25).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, -32602);  // Invalid params
+        assert!(err.message.contains("Name cannot be empty"));
+    }
+
+    #[tokio::test]
+    async fn test_not_found_error() {
+        let server = MyServer::new();
+
+        let result = server.get_user(999).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, -32001);  // Not found
+        assert!(err.message.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_custom_error_conversion() {
+        // Test that MyError converts correctly
+        let my_err = MyError::Database("Connection failed".into());
+        let error_data: ErrorData = my_err.into();
+
+        assert_eq!(error_data.code, -32603);  // Internal error
+        assert!(error_data.message.contains("Connection failed"));
+    }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Building a Server" icon="server" href="/guides/building-server">
+    Apply error handling in servers
+  </Card>
+  <Card title="Building a Client" icon="laptop-code" href="/guides/building-client">
+    Handle errors in clients
+  </Card>
+  <Card title="Testing" icon="vial" href="/guides/testing">
+    Test error scenarios
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/troubleshooting/overview">
+    Fix common errors
+  </Card>
+</CardGroup>

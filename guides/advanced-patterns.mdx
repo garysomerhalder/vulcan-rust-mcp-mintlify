@@ -1,0 +1,1202 @@
+---
+title: Advanced Patterns
+description: 'Production-ready patterns for rate limiting, caching, graceful shutdown, and more'
+---
+
+# Advanced Patterns
+
+Master production-ready patterns for building robust, scalable MCP servers.
+
+## Overview
+
+<CardGroup cols={4}>
+  <Card title="Rate Limiting" icon="gauge">
+    Protect against abuse
+  </Card>
+  <Card title="Graceful Shutdown" icon="power-off">
+    Clean termination
+  </Card>
+  <Card title="Caching" icon="bolt">
+    Optimize performance
+  </Card>
+  <Card title="Circuit Breakers" icon="shield">
+    Fault tolerance
+  </Card>
+</CardGroup>
+
+---
+
+## 1. Rate Limiting
+
+### Per-User Rate Limiting
+
+```rust
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use std::time::{Duration, Instant};
+
+#[derive(Clone)]
+struct RateLimiter {
+    // user_id -> (request_count, window_start)
+    limits: Arc<RwLock<HashMap<String, (u32, Instant)>>>,
+    max_requests: u32,
+    window: Duration,
+}
+
+impl RateLimiter {
+    fn new(max_requests: u32, window: Duration) -> Self {
+        Self {
+            limits: Arc::new(RwLock::new(HashMap::new())),
+            max_requests,
+            window,
+        }
+    }
+
+    async fn check(&self, user_id: &str) -> Result<(), ErrorData> {
+        let mut limits = self.limits.write().await;
+        let now = Instant::now();
+
+        let entry = limits.entry(user_id.to_string()).or_insert((0, now));
+
+        // Reset window if expired
+        if now.duration_since(entry.1) > self.window {
+            entry.0 = 0;
+            entry.1 = now;
+        }
+
+        // Check limit
+        if entry.0 >= self.max_requests {
+            return Err(ErrorData::invalid_input(format!(
+                "Rate limit exceeded: {} requests per {:?}",
+                self.max_requests, self.window
+            )));
+        }
+
+        entry.0 += 1;
+        Ok(())
+    }
+
+    // Cleanup expired entries periodically
+    async fn cleanup(&self) {
+        let mut limits = self.limits.write().await;
+        let now = Instant::now();
+        limits.retain(|_, (_, window_start)| {
+            now.duration_since(*window_start) < self.window * 2
+        });
+    }
+}
+
+#[derive(Clone)]
+pub struct RateLimitedServer {
+    tool_router: ToolRouter<Self>,
+    rate_limiter: RateLimiter,
+}
+
+#[tool_router]
+impl RateLimitedServer {
+    fn new() -> Self {
+        // 100 requests per minute per user
+        let rate_limiter = RateLimiter::new(100, Duration::from_secs(60));
+
+        // Start cleanup task
+        let limiter_clone = rate_limiter.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(120));
+            loop {
+                interval.tick().await;
+                limiter_clone.cleanup().await;
+            }
+        });
+
+        Self {
+            tool_router: Self::tool_router(),
+            rate_limiter,
+        }
+    }
+
+    #[tool(description = "Rate-limited tool")]
+    async fn expensive_operation(&self, user_id: String) -> Result<String, ErrorData> {
+        // Check rate limit first
+        self.rate_limiter.check(&user_id).await?;
+
+        // Perform expensive operation
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        Ok("Operation completed".to_string())
+    }
+}
+```
+
+### Token Bucket Algorithm
+
+<Tabs>
+  <Tab title="Token Bucket">
+    ```rust
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Instant;
+
+    pub struct TokenBucket {
+        tokens: AtomicU32,
+        capacity: u32,
+        refill_rate: u32, // tokens per second
+        last_refill: Arc<RwLock<Instant>>,
+    }
+
+    impl TokenBucket {
+        pub fn new(capacity: u32, refill_rate: u32) -> Self {
+            Self {
+                tokens: AtomicU32::new(capacity),
+                capacity,
+                refill_rate,
+                last_refill: Arc::new(RwLock::new(Instant::now())),
+            }
+        }
+
+        pub async fn try_acquire(&self, tokens: u32) -> bool {
+            self.refill().await;
+
+            let current = self.tokens.load(Ordering::Acquire);
+            if current >= tokens {
+                self.tokens.fetch_sub(tokens, Ordering::Release);
+                true
+            } else {
+                false
+            }
+        }
+
+        async fn refill(&self) {
+            let mut last_refill = self.last_refill.write().await;
+            let now = Instant::now();
+            let elapsed = now.duration_since(*last_refill).as_secs_f64();
+
+            let tokens_to_add = (elapsed * self.refill_rate as f64) as u32;
+            if tokens_to_add > 0 {
+                let current = self.tokens.load(Ordering::Acquire);
+                let new_tokens = (current + tokens_to_add).min(self.capacity);
+                self.tokens.store(new_tokens, Ordering::Release);
+                *last_refill = now;
+            }
+        }
+    }
+
+    // Usage in server
+    #[tool(description = "Token bucket rate-limited tool")]
+    async fn limited_tool(&self) -> Result<String, ErrorData> {
+        if !self.token_bucket.try_acquire(1).await {
+            return Err(ErrorData::invalid_input("Rate limit exceeded - try again later"));
+        }
+        Ok("Success".to_string())
+    }
+    ```
+  </Tab>
+
+  <Tab title="With Tower Middleware">
+    ```rust
+    use tower_governor::{
+        governor::GovernorConfigBuilder,
+        GovernorLayer,
+    };
+
+    // For HTTP/SSE/WebSocket servers
+    let governor_conf = Box::new(
+        GovernorConfigBuilder::default()
+            .per_second(10)
+            .burst_size(20)
+            .finish()
+            .unwrap(),
+    );
+
+    let app = Router::new()
+        .route("/mcp", post(mcp_handler))
+        .layer(GovernorLayer {
+            config: Box::leak(governor_conf),
+        });
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## 2. Graceful Shutdown
+
+### Signal Handling
+
+```rust
+use tokio::signal;
+use std::sync::Arc;
+use tokio::sync::Notify;
+
+pub struct ServerWithShutdown {
+    tool_router: ToolRouter<Self>,
+    shutdown: Arc<Notify>,
+    background_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl ServerWithShutdown {
+    pub fn new() -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+            shutdown: Arc::new(Notify::new()),
+            background_tasks: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    pub async fn serve_with_shutdown(
+        self,
+        transport: impl Transport + 'static,
+    ) -> Result<(), ErrorData> {
+        let shutdown = self.shutdown.clone();
+        let tasks = self.background_tasks.clone();
+
+        // Spawn signal handler
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            tracing::info!("Shutdown signal received, starting graceful shutdown...");
+            shutdown.notify_waiters();
+        });
+
+        // Serve with shutdown notification
+        tokio::select! {
+            result = self.serve(transport) => {
+                result
+            }
+            _ = self.shutdown.notified() => {
+                tracing::info!("Shutting down server...");
+
+                // Cancel all background tasks
+                let mut task_list = tasks.write().await;
+                for task in task_list.drain(..) {
+                    task.abort();
+                }
+
+                // Flush any pending data
+                self.flush().await?;
+
+                tracing::info!("Graceful shutdown complete");
+                Ok(())
+            }
+        }
+    }
+
+    async fn flush(&self) -> Result<(), ErrorData> {
+        // Flush caches, close connections, etc.
+        tracing::info!("Flushing pending operations...");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Ok(())
+    }
+
+    fn spawn_background_task<F>(&self, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let handle = tokio::spawn(task);
+        self.background_tasks.blocking_write().push(handle);
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+}
+
+// Usage
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let server = ServerWithShutdown::new();
+    let transport = StdioTransport::new();
+
+    server.serve_with_shutdown(transport).await?;
+    Ok(())
+}
+```
+
+### Connection Draining (HTTP)
+
+```rust
+use axum::Router;
+use tokio::net::TcpListener;
+
+async fn serve_with_graceful_shutdown(
+    app: Router,
+    listener: TcpListener,
+) -> Result<(), Box<dyn std::error::Error>> {
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(())
+}
+
+// Automatically waits for in-flight requests to complete
+```
+
+---
+
+## 3. Caching Strategies
+
+### Multi-Level Cache
+
+<Tabs>
+  <Tab title="L1 + L2 Cache">
+    ```rust
+    use moka::future::Cache;
+    use std::sync::Arc;
+
+    pub struct MultiLevelCache<K, V> {
+        l1: Cache<K, Arc<V>>,  // Fast in-memory
+        l2: Cache<K, Arc<V>>,  // Larger capacity
+    }
+
+    impl<K, V> MultiLevelCache<K, V>
+    where
+        K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+        V: Clone + Send + Sync + 'static,
+    {
+        pub fn new() -> Self {
+            Self {
+                l1: Cache::builder()
+                    .max_capacity(100)
+                    .time_to_live(Duration::from_secs(60))
+                    .build(),
+                l2: Cache::builder()
+                    .max_capacity(1000)
+                    .time_to_live(Duration::from_secs(300))
+                    .build(),
+            }
+        }
+
+        pub async fn get(&self, key: &K) -> Option<Arc<V>> {
+            // Check L1 first
+            if let Some(value) = self.l1.get(key).await {
+                return Some(value);
+            }
+
+            // Check L2
+            if let Some(value) = self.l2.get(key).await {
+                // Promote to L1
+                self.l1.insert(key.clone(), value.clone()).await;
+                return Some(value);
+            }
+
+            None
+        }
+
+        pub async fn insert(&self, key: K, value: V) {
+            let arc_value = Arc::new(value);
+            self.l1.insert(key.clone(), arc_value.clone()).await;
+            self.l2.insert(key, arc_value).await;
+        }
+
+        pub async fn invalidate(&self, key: &K) {
+            self.l1.invalidate(key).await;
+            self.l2.invalidate(key).await;
+        }
+    }
+
+    // Usage in server
+    #[derive(Clone)]
+    pub struct CachedServer {
+        tool_router: ToolRouter<Self>,
+        cache: MultiLevelCache<String, String>,
+        db: PgPool,
+    }
+
+    #[tool(description = "Get data with multi-level caching")]
+    async fn get_data(&self, key: String) -> Result<String, ErrorData> {
+        // Check cache first
+        if let Some(value) = self.cache.get(&key).await {
+            return Ok((*value).clone());
+        }
+
+        // Fetch from database
+        let value = sqlx::query_scalar::<_, String>("SELECT value FROM data WHERE key = $1")
+            .bind(&key)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|e| ErrorData::not_found(format!("Key not found: {}", e)))?;
+
+        // Store in cache
+        self.cache.insert(key, value.clone()).await;
+
+        Ok(value)
+    }
+    ```
+  </Tab>
+
+  <Tab title="Cache-Aside Pattern">
+    ```rust
+    // Read-through cache
+    async fn get_or_fetch<F, T>(
+        cache: &Cache<String, T>,
+        key: &str,
+        fetch: F,
+    ) -> Result<T, ErrorData>
+    where
+        F: Future<Output = Result<T, ErrorData>>,
+        T: Clone + Send + Sync + 'static,
+    {
+        if let Some(value) = cache.get(key).await {
+            return Ok(value);
+        }
+
+        let value = fetch.await?;
+        cache.insert(key.to_string(), value.clone()).await;
+        Ok(value)
+    }
+
+    // Usage
+    #[tool(description = "Cached user lookup")]
+    async fn get_user(&self, user_id: String) -> Result<User, ErrorData> {
+        get_or_fetch(&self.user_cache, &user_id, async {
+            sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+                .bind(&user_id)
+                .fetch_one(&self.db)
+                .await
+                .map_err(|e| ErrorData::not_found(format!("User not found: {}", e)))
+        }).await
+    }
+    ```
+  </Tab>
+
+  <Tab title="Write-Through Cache">
+    ```rust
+    #[tool(description = "Update user with cache invalidation")]
+    async fn update_user(
+        &self,
+        user_id: String,
+        name: String,
+    ) -> Result<User, ErrorData> {
+        // Update database
+        let user = sqlx::query_as::<_, User>(
+            "UPDATE users SET name = $1, updated_at = NOW() WHERE id = $2 RETURNING *"
+        )
+        .bind(&name)
+        .bind(&user_id)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| ErrorData::internal(format!("Update failed: {}", e)))?;
+
+        // Update cache immediately (write-through)
+        self.user_cache.insert(user_id.clone(), user.clone()).await;
+
+        Ok(user)
+    }
+
+    #[tool(description = "Delete user with cache invalidation")]
+    async fn delete_user(&self, user_id: String) -> Result<String, ErrorData> {
+        // Delete from database
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&self.db)
+            .await
+            .map_err(|e| ErrorData::internal(format!("Delete failed: {}", e)))?;
+
+        // Invalidate cache
+        self.user_cache.invalidate(&user_id).await;
+
+        Ok(format!("User {} deleted", user_id))
+    }
+    ```
+  </Tab>
+</Tabs>
+
+### Cache Warming
+
+```rust
+impl CachedServer {
+    pub async fn new(db: PgPool) -> Result<Self, ErrorData> {
+        let cache = MultiLevelCache::new();
+
+        let server = Self {
+            tool_router: Self::tool_router(),
+            cache,
+            db: db.clone(),
+        };
+
+        // Warm cache with frequently accessed data
+        server.warm_cache().await?;
+
+        Ok(server)
+    }
+
+    async fn warm_cache(&self) -> Result<(), ErrorData> {
+        tracing::info!("Warming cache...");
+
+        // Pre-load hot data
+        let hot_keys = sqlx::query_scalar::<_, String>(
+            "SELECT key FROM data ORDER BY access_count DESC LIMIT 100"
+        )
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| ErrorData::internal(format!("Cache warming failed: {}", e)))?;
+
+        for key in hot_keys {
+            if let Ok(value) = self.fetch_from_db(&key).await {
+                self.cache.insert(key, value).await;
+            }
+        }
+
+        tracing::info!("Cache warmed with {} entries", 100);
+        Ok(())
+    }
+}
+```
+
+---
+
+## 4. Circuit Breaker
+
+### Implementation
+
+```rust
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CircuitState {
+    Closed,   // Normal operation
+    Open,     // Failing, reject requests
+    HalfOpen, // Testing if service recovered
+}
+
+pub struct CircuitBreaker {
+    state: Arc<RwLock<CircuitState>>,
+    failure_count: AtomicU32,
+    success_count: AtomicU32,
+    last_failure_time: Arc<RwLock<Option<Instant>>>,
+    failure_threshold: u32,
+    timeout: Duration,
+    half_open_timeout: Duration,
+}
+
+impl CircuitBreaker {
+    pub fn new(failure_threshold: u32, timeout: Duration) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(CircuitState::Closed)),
+            failure_count: AtomicU32::new(0),
+            success_count: AtomicU32::new(0),
+            last_failure_time: Arc::new(RwLock::new(None)),
+            failure_threshold,
+            timeout,
+            half_open_timeout: timeout / 2,
+        }
+    }
+
+    pub async fn call<F, T, E>(&self, f: F) -> Result<T, ErrorData>
+    where
+        F: Future<Output = Result<T, E>>,
+        E: std::fmt::Display,
+    {
+        // Check circuit state
+        let state = *self.state.read().await;
+
+        match state {
+            CircuitState::Open => {
+                // Check if timeout expired
+                let last_failure = self.last_failure_time.read().await;
+                if let Some(time) = *last_failure {
+                    if time.elapsed() > self.timeout {
+                        // Try half-open
+                        *self.state.write().await = CircuitState::HalfOpen;
+                        tracing::info!("Circuit breaker entering half-open state");
+                    } else {
+                        return Err(ErrorData::internal("Circuit breaker is open - service unavailable"));
+                    }
+                }
+            }
+            CircuitState::HalfOpen => {
+                // Only allow limited requests in half-open
+                if self.success_count.load(Ordering::Acquire) >= 3 {
+                    *self.state.write().await = CircuitState::Closed;
+                    self.failure_count.store(0, Ordering::Release);
+                    self.success_count.store(0, Ordering::Release);
+                    tracing::info!("Circuit breaker closed - service recovered");
+                }
+            }
+            CircuitState::Closed => {
+                // Normal operation
+            }
+        }
+
+        // Execute function
+        match f.await {
+            Ok(result) => {
+                self.on_success().await;
+                Ok(result)
+            }
+            Err(e) => {
+                self.on_failure().await;
+                Err(ErrorData::internal(format!("Circuit breaker detected failure: {}", e)))
+            }
+        }
+    }
+
+    async fn on_success(&self) {
+        let state = *self.state.read().await;
+
+        if state == CircuitState::HalfOpen {
+            self.success_count.fetch_add(1, Ordering::Release);
+        } else if state == CircuitState::Closed {
+            // Reset failure count on success
+            self.failure_count.store(0, Ordering::Release);
+        }
+    }
+
+    async fn on_failure(&self) {
+        let failures = self.failure_count.fetch_add(1, Ordering::Release) + 1;
+        *self.last_failure_time.write().await = Some(Instant::now());
+
+        if failures >= self.failure_threshold {
+            *self.state.write().await = CircuitState::Open;
+            tracing::warn!("Circuit breaker opened after {} failures", failures);
+        }
+    }
+}
+
+// Usage in server
+#[derive(Clone)]
+pub struct ResilientServer {
+    tool_router: ToolRouter<Self>,
+    circuit_breaker: Arc<CircuitBreaker>,
+}
+
+#[tool(description = "Call external service with circuit breaker")]
+async fn call_external_service(&self, url: String) -> Result<String, ErrorData> {
+    self.circuit_breaker.call(async {
+        reqwest::get(&url)
+            .await
+            .map_err(|e| format!("Request failed: {}", e))?
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read response: {}", e))
+    }).await
+}
+```
+
+---
+
+## 5. Request Deduplication
+
+### Deduplication with In-Flight Tracking
+
+```rust
+use std::collections::HashMap;
+use tokio::sync::oneshot;
+
+type RequestId = String;
+type ResponseFuture = oneshot::Receiver<Result<String, ErrorData>>;
+
+pub struct DeduplicationLayer {
+    in_flight: Arc<RwLock<HashMap<RequestId, Vec<oneshot::Sender<Result<String, ErrorData>>>>>>,
+}
+
+impl DeduplicationLayer {
+    pub fn new() -> Self {
+        Self {
+            in_flight: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub async fn execute<F>(
+        &self,
+        request_id: RequestId,
+        f: F,
+    ) -> Result<String, ErrorData>
+    where
+        F: Future<Output = Result<String, ErrorData>>,
+    {
+        let (tx, rx) = oneshot::channel();
+
+        let is_first = {
+            let mut in_flight = self.in_flight.write().await;
+            let entry = in_flight.entry(request_id.clone()).or_insert_with(Vec::new);
+
+            if entry.is_empty() {
+                // First request - we'll execute it
+                entry.push(tx);
+                true
+            } else {
+                // Duplicate request - wait for first to complete
+                entry.push(tx);
+                false
+            }
+        };
+
+        if is_first {
+            // Execute the request
+            let result = f.await;
+
+            // Notify all waiters
+            let mut in_flight = self.in_flight.write().await;
+            if let Some(waiters) = in_flight.remove(&request_id) {
+                for waiter in waiters {
+                    let _ = waiter.send(result.clone());
+                }
+            }
+
+            result
+        } else {
+            // Wait for result from first request
+            rx.await
+                .map_err(|_| ErrorData::internal("Request cancelled"))?
+        }
+    }
+}
+
+// Usage
+#[derive(Clone)]
+pub struct DeduplicatedServer {
+    tool_router: ToolRouter<Self>,
+    dedup: Arc<DeduplicationLayer>,
+}
+
+#[tool(description = "Deduplicated expensive operation")]
+async fn expensive_operation(&self, request_id: String) -> Result<String, ErrorData> {
+    self.dedup.execute(request_id, async {
+        // Only executed once per unique request_id
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        Ok("Expensive result".to_string())
+    }).await
+}
+```
+
+---
+
+## 6. Background Jobs
+
+### Job Queue
+
+<Tabs>
+  <Tab title="Simple Queue">
+    ```rust
+    use tokio::sync::mpsc;
+
+    #[derive(Debug, Clone)]
+    pub struct Job {
+        pub id: String,
+        pub task: String,
+        pub payload: serde_json::Value,
+    }
+
+    pub struct JobQueue {
+        tx: mpsc::UnboundedSender<Job>,
+    }
+
+    impl JobQueue {
+        pub fn new<F>(worker: F) -> Self
+        where
+            F: Fn(Job) -> BoxFuture<'static, Result<(), ErrorData>> + Send + Sync + 'static,
+        {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+
+            tokio::spawn(async move {
+                while let Some(job) = rx.recv().await {
+                    tracing::info!("Processing job: {}", job.id);
+                    match worker(job.clone()).await {
+                        Ok(_) => tracing::info!("Job {} completed", job.id),
+                        Err(e) => tracing::error!("Job {} failed: {}", job.id, e.message),
+                    }
+                }
+            });
+
+            Self { tx }
+        }
+
+        pub fn enqueue(&self, job: Job) -> Result<(), ErrorData> {
+            self.tx.send(job)
+                .map_err(|_| ErrorData::internal("Job queue is closed"))
+        }
+    }
+
+    // Usage
+    #[derive(Clone)]
+    pub struct ServerWithJobs {
+        tool_router: ToolRouter<Self>,
+        job_queue: Arc<JobQueue>,
+    }
+
+    impl ServerWithJobs {
+        pub fn new() -> Self {
+            let job_queue = Arc::new(JobQueue::new(|job| {
+                Box::pin(async move {
+                    // Process job
+                    match job.task.as_str() {
+                        "send_email" => send_email(job.payload).await,
+                        "generate_report" => generate_report(job.payload).await,
+                        _ => Err(ErrorData::invalid_input("Unknown job type")),
+                    }
+                })
+            }));
+
+            Self {
+                tool_router: Self::tool_router(),
+                job_queue,
+            }
+        }
+
+        #[tool(description = "Enqueue background job")]
+        async fn enqueue_job(&self, task: String, payload: serde_json::Value) -> Result<String, ErrorData> {
+            let job = Job {
+                id: uuid::Uuid::new_v4().to_string(),
+                task,
+                payload,
+            };
+
+            let job_id = job.id.clone();
+            self.job_queue.enqueue(job)?;
+
+            Ok(format!("Job {} enqueued", job_id))
+        }
+    }
+    ```
+  </Tab>
+
+  <Tab title="With Persistence (Database)">
+    ```rust
+    use sqlx::PgPool;
+
+    pub struct PersistentJobQueue {
+        db: PgPool,
+    }
+
+    impl PersistentJobQueue {
+        pub async fn enqueue(&self, job: Job) -> Result<(), ErrorData> {
+            sqlx::query(
+                "INSERT INTO jobs (id, task, payload, status, created_at) \
+                 VALUES ($1, $2, $3, 'pending', NOW())"
+            )
+            .bind(&job.id)
+            .bind(&job.task)
+            .bind(&job.payload)
+            .execute(&self.db)
+            .await
+            .map_err(|e| ErrorData::internal(format!("Failed to enqueue job: {}", e)))?;
+
+            Ok(())
+        }
+
+        pub async fn process_pending(&self) -> Result<(), ErrorData> {
+            let jobs = sqlx::query_as::<_, Job>(
+                "SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at LIMIT 10"
+            )
+            .fetch_all(&self.db)
+            .await?;
+
+            for job in jobs {
+                self.mark_processing(&job.id).await?;
+
+                match self.execute_job(&job).await {
+                    Ok(_) => self.mark_completed(&job.id).await?,
+                    Err(e) => self.mark_failed(&job.id, &e.message).await?,
+                }
+            }
+
+            Ok(())
+        }
+
+        async fn mark_processing(&self, job_id: &str) -> Result<(), ErrorData> {
+            sqlx::query("UPDATE jobs SET status = 'processing', started_at = NOW() WHERE id = $1")
+                .bind(job_id)
+                .execute(&self.db)
+                .await?;
+            Ok(())
+        }
+
+        async fn mark_completed(&self, job_id: &str) -> Result<(), ErrorData> {
+            sqlx::query("UPDATE jobs SET status = 'completed', completed_at = NOW() WHERE id = $1")
+                .bind(job_id)
+                .execute(&self.db)
+                .await?;
+            Ok(())
+        }
+
+        async fn mark_failed(&self, job_id: &str, error: &str) -> Result<(), ErrorData> {
+            sqlx::query(
+                "UPDATE jobs SET status = 'failed', error = $2, completed_at = NOW() WHERE id = $1"
+            )
+            .bind(job_id)
+            .bind(error)
+            .execute(&self.db)
+            .await?;
+            Ok(())
+        }
+    }
+
+    // Worker process
+    async fn start_worker(queue: PersistentJobQueue) {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            if let Err(e) = queue.process_pending().await {
+                tracing::error!("Worker error: {}", e.message);
+            }
+        }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## 7. Health Checks
+
+### Comprehensive Health Monitoring
+
+```rust
+use serde::Serialize;
+
+#[derive(Serialize)]
+pub struct HealthStatus {
+    pub status: String,        // "healthy", "degraded", "unhealthy"
+    pub checks: Vec<HealthCheck>,
+    pub uptime_seconds: u64,
+}
+
+#[derive(Serialize)]
+pub struct HealthCheck {
+    pub name: String,
+    pub status: String,
+    pub message: Option<String>,
+    pub duration_ms: u64,
+}
+
+#[derive(Clone)]
+pub struct MonitoredServer {
+    tool_router: ToolRouter<Self>,
+    db: PgPool,
+    cache: Arc<Cache<String, String>>,
+    start_time: Instant,
+}
+
+impl MonitoredServer {
+    #[tool(description = "Comprehensive health check")]
+    async fn health(&self) -> Result<HealthStatus, ErrorData> {
+        let mut checks = Vec::new();
+
+        // Database check
+        let db_start = Instant::now();
+        let db_status = match self.check_database().await {
+            Ok(_) => HealthCheck {
+                name: "database".to_string(),
+                status: "healthy".to_string(),
+                message: Some("Connected".to_string()),
+                duration_ms: db_start.elapsed().as_millis() as u64,
+            },
+            Err(e) => HealthCheck {
+                name: "database".to_string(),
+                status: "unhealthy".to_string(),
+                message: Some(e.message),
+                duration_ms: db_start.elapsed().as_millis() as u64,
+            },
+        };
+        checks.push(db_status);
+
+        // Cache check
+        let cache_start = Instant::now();
+        let cache_status = match self.check_cache().await {
+            Ok(_) => HealthCheck {
+                name: "cache".to_string(),
+                status: "healthy".to_string(),
+                message: Some(format!("Size: {}", self.cache.entry_count())),
+                duration_ms: cache_start.elapsed().as_millis() as u64,
+            },
+            Err(e) => HealthCheck {
+                name: "cache".to_string(),
+                status: "degraded".to_string(),
+                message: Some(e.message),
+                duration_ms: cache_start.elapsed().as_millis() as u64,
+            },
+        };
+        checks.push(cache_status);
+
+        // Determine overall status
+        let overall_status = if checks.iter().any(|c| c.status == "unhealthy") {
+            "unhealthy"
+        } else if checks.iter().any(|c| c.status == "degraded") {
+            "degraded"
+        } else {
+            "healthy"
+        };
+
+        Ok(HealthStatus {
+            status: overall_status.to_string(),
+            checks,
+            uptime_seconds: self.start_time.elapsed().as_secs(),
+        })
+    }
+
+    async fn check_database(&self) -> Result<(), ErrorData> {
+        sqlx::query("SELECT 1")
+            .fetch_one(&self.db)
+            .await
+            .map_err(|e| ErrorData::internal(format!("Database check failed: {}", e)))?;
+        Ok(())
+    }
+
+    async fn check_cache(&self) -> Result<(), ErrorData> {
+        self.cache.get("health_check_key").await;
+        Ok(())
+    }
+
+    #[tool(description = "Get server metrics")]
+    async fn metrics(&self) -> Result<serde_json::Value, ErrorData> {
+        Ok(serde_json::json!({
+            "uptime_seconds": self.start_time.elapsed().as_secs(),
+            "database_pool_size": self.db.size(),
+            "database_idle_connections": self.db.num_idle(),
+            "cache_size": self.cache.entry_count(),
+            "cache_capacity": self.cache.weighted_size(),
+        }))
+    }
+}
+```
+
+---
+
+## 8. Multi-Tenancy
+
+### Tenant Isolation
+
+```rust
+pub struct TenantContext {
+    pub tenant_id: String,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct MultiTenantServer {
+    tool_router: ToolRouter<Self>,
+    db: PgPool,
+}
+
+impl MultiTenantServer {
+    async fn get_tenant_context(&self, tenant_id: &str) -> Result<TenantContext, ErrorData> {
+        // Fetch tenant permissions
+        let permissions = sqlx::query_scalar::<_, String>(
+            "SELECT permission FROM tenant_permissions WHERE tenant_id = $1"
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| ErrorData::internal(format!("Failed to fetch permissions: {}", e)))?;
+
+        Ok(TenantContext {
+            tenant_id: tenant_id.to_string(),
+            permissions,
+        })
+    }
+
+    #[tool(description = "Create tenant-scoped resource")]
+    async fn create_resource(
+        &self,
+        tenant_id: String,
+        name: String,
+        data: serde_json::Value,
+    ) -> Result<String, ErrorData> {
+        // Verify tenant context
+        let context = self.get_tenant_context(&tenant_id).await?;
+
+        if !context.permissions.contains(&"create_resource".to_string()) {
+            return Err(ErrorData::invalid_input("Permission denied"));
+        }
+
+        // Insert with tenant_id for isolation
+        let id = sqlx::query_scalar::<_, String>(
+            "INSERT INTO resources (tenant_id, name, data) VALUES ($1, $2, $3) RETURNING id"
+        )
+        .bind(&tenant_id)
+        .bind(&name)
+        .bind(&data)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| ErrorData::internal(format!("Failed to create resource: {}", e)))?;
+
+        Ok(id)
+    }
+
+    #[tool(description = "List tenant-scoped resources")]
+    async fn list_resources(&self, tenant_id: String) -> Result<Vec<serde_json::Value>, ErrorData> {
+        // Only return resources for this tenant
+        let resources = sqlx::query_as::<_, (String, String, serde_json::Value)>(
+            "SELECT id, name, data FROM resources WHERE tenant_id = $1"
+        )
+        .bind(&tenant_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| ErrorData::internal(format!("Failed to list resources: {}", e)))?;
+
+        Ok(resources.into_iter().map(|(id, name, data)| {
+            serde_json::json!({ "id": id, "name": name, "data": data })
+        }).collect())
+    }
+}
+```
+
+---
+
+## Summary
+
+<CardGroup cols={2}>
+  <Card title="Database Integration" icon="database" href="/examples-docs/database-integration">
+    Build database-backed servers
+  </Card>
+  <Card title="Middleware Guide" icon="layer-group" href="/examples-docs/middleware">
+    Composable cross-cutting concerns
+  </Card>
+  <Card title="Testing Guide" icon="vial" href="/guides/testing">
+    Test advanced patterns
+  </Card>
+  <Card title="Deployment" icon="rocket" href="/guides/deployment">
+    Deploy to production
+  </Card>
+</CardGroup>
+
+## Production Checklist
+
+<AccordionGroup>
+  <Accordion title="✅ Performance">
+    - [ ] Rate limiting configured
+    - [ ] Caching strategy implemented
+    - [ ] Database connection pool tuned
+    - [ ] Query optimization complete
+  </Accordion>
+
+  <Accordion title="✅ Reliability">
+    - [ ] Circuit breakers for external services
+    - [ ] Graceful shutdown implemented
+    - [ ] Health checks configured
+    - [ ] Request deduplication for idempotency
+  </Accordion>
+
+  <Accordion title="✅ Observability">
+    - [ ] Structured logging (tracing)
+    - [ ] Metrics collection
+    - [ ] Health check endpoints
+    - [ ] Error tracking
+  </Accordion>
+
+  <Accordion title="✅ Security">
+    - [ ] Authentication middleware
+    - [ ] Input validation
+    - [ ] Rate limiting per user
+    - [ ] Tenant isolation (if multi-tenant)
+  </Accordion>
+</AccordionGroup>

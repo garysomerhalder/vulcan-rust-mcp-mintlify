@@ -1,0 +1,145 @@
+---
+title: Resources
+description: 'Expose data sources to AI assistants'
+---
+
+# Resources
+
+**Resources** expose data sources that AI assistants can read to gather context. Think of them as RESTful GET endpoints for your data - providing read-only access through URI-based identifiers.
+
+<Tip>
+For comprehensive examples and patterns, see the [Working with Resources](/guides/working-with-resources) guide.
+</Tip>
+
+## What is a Resource?
+
+A **resource** is:
+- A **URI** (e.g., `file:///path/to/doc.txt`, `db://users/123`)
+- **Metadata** (name, description, MIME type)
+- **Content** (text, binary, or structured data)
+
+## Basic Example
+
+```rust
+use vulcan::{resource, resource_router, ServerHandler};
+use vulcan::handler::server::resource::ResourceRouter;
+use vulcan::model::*;
+
+#[derive(Clone)]
+struct FileServer {
+    resource_router: ResourceRouter<Self>,
+}
+
+#[resource_router]
+impl FileServer {
+    fn new() -> Self {
+        Self {
+            resource_router: Self::resource_router(),
+        }
+    }
+
+    #[resource(
+        uri = "file:///{path}",
+        name = "File",
+        description = "Read a file from the filesystem"
+    )]
+    async fn read_file(&self, path: String) -> Result<String, ErrorData> {
+        tokio::fs::read_to_string(&path).await
+            .map_err(|e| ErrorData::not_found(format!("File not found: {}", e)))
+    }
+}
+```
+
+## Resource URIs
+
+Resources are identified by URIs with custom schemes:
+
+- `file:///path/to/file` - Filesystem resources
+- `db://table/id` - Database records
+- `http://example.com/api/data` - HTTP endpoints
+- `memory://key` - In-memory data
+
+## Resource Templates
+
+**Resource templates** allow parameterized URIs:
+
+```rust
+#[resource(
+    uri = "user://{user_id}/profile",
+    name = "User Profile",
+    description = "Get user profile by ID"
+)]
+async fn get_user_profile(&self, user_id: i64) -> Result<UserProfile, ErrorData> {
+    self.db.get_user(user_id).await
+        .ok_or_else(|| ErrorData::not_found("User not found"))
+}
+```
+
+## Resource Subscriptions
+
+Clients can **subscribe** to resource changes:
+
+```rust
+impl ServerHandler for FileServer {
+    async fn subscribe(
+        &self,
+        request: SubscribeRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        // Watch file for changes
+        let uri = request.uri;
+        self.watch_file(uri).await?;
+        Ok(())
+    }
+
+    async fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        // Stop watching file
+        let uri = request.uri;
+        self.unwatch_file(uri).await?;
+        Ok(())
+    }
+}
+```
+
+When a resource changes, send a notification:
+
+```rust
+use vulcan::model::ResourceUpdatedNotification;
+
+// File changed - notify subscribers
+let notification = ResourceUpdatedNotification {
+    uri: "file:///path/to/file.txt".into(),
+};
+
+context.peer.notify(notification).await?;
+```
+
+## Resource vs Tool
+
+| Feature | Resource | Tool |
+|---------|----------|------|
+| **Purpose** | Read data | Perform actions |
+| **Access Pattern** | URI-based | Method call |
+| **Side Effects** | No | Yes |
+| **Caching** | Safe to cache | Not cacheable |
+
+## Learn More
+
+<CardGroup cols={2}>
+  <Card title="Working with Resources" icon="database" href="/guides/working-with-resources">
+    Complete guide with file, API, and database examples
+  </Card>
+  <Card title="Prompts" icon="message" href="/concepts/prompts">
+    Learn about prompt templates
+  </Card>
+  <Card title="Building a Server" icon="server" href="/guides/building-server">
+    Build servers with resources
+  </Card>
+  <Card title="Database Integration" icon="database" href="/examples-docs/database-integration">
+    Database resources with SQLx
+  </Card>
+</CardGroup>

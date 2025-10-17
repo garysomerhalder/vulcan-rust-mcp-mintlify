@@ -1,0 +1,679 @@
+---
+title: Building a Client
+description: 'Complete guide to building MCP clients with Vulcan'
+---
+
+# Building an MCP Client
+
+Learn how to build MCP clients that connect to and interact with MCP servers.
+
+## Overview
+
+Building an MCP client with Vulcan involves three main steps:
+
+<Steps>
+  <Step title="Choose a Transport">
+    Select how your client will connect to the server (child process, HTTP, SSE, etc.)
+  </Step>
+  <Step title="Connect to Server">
+    Use `.serve(transport)` to establish connection and initialize
+  </Step>
+  <Step title="Call Tools">
+    List available tools and call them using the service API
+  </Step>
+</Steps>
+
+## Quick Example
+
+Here's a complete MCP client that connects to a server and calls a tool:
+
+```rust
+use vulcan::{service::ServiceExt, transport::TokioChildProcess};
+use tokio::process::Command;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Create transport to server
+    let transport = TokioChildProcess::new(
+        Command::new("./target/release/my-mcp-server")
+    )?;
+
+    // 2. Connect to server (ClientHandler is implemented by ())
+    let service = ().serve(transport).await?;
+
+    // 3. List available tools
+    let tools = service.list_tools(Default::default()).await?;
+    println!("Available tools: {:#?}", tools);
+
+    // 4. Call a tool
+    let result = service.call_tool(vulcan::model::CallToolRequestParam {
+        name: "increment".into(),
+        arguments: None,
+    }).await?;
+
+    println!("Result: {:#?}", result);
+
+    Ok(())
+}
+```
+
+That's it! No handler implementation needed for basic clients - `()` implements `ClientHandler` automatically.
+
+## Step-by-Step Guide
+
+### 1. Project Setup
+
+Create a new Rust project:
+
+```bash
+cargo new my-mcp-client
+cd my-mcp-client
+```
+
+Add dependencies to `Cargo.toml`:
+
+```toml Cargo.toml
+[dependencies]
+vulcan = { version = "0.1", features = ["client", "transport-child-process"] }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+```
+
+<Note>
+Enable the `client` feature for client-side functionality. You'll also need a transport feature like `transport-child-process`, `transport-http`, or `transport-sse-client`.
+</Note>
+
+### 2. Connecting to a Server
+
+The connection method depends on your transport choice:
+
+<Tabs>
+  <Tab title="Child Process (Local Server)">
+    **Best for:** Connecting to local MCP servers
+
+    ```rust
+    use vulcan::{service::ServiceExt, transport::TokioChildProcess};
+    use tokio::process::Command;
+
+    let transport = TokioChildProcess::new(
+        Command::new("path/to/server")
+    )?;
+
+    let service = ().serve(transport).await?;
+    ```
+
+    **With arguments:**
+    ```rust
+    use vulcan::transport::ConfigureCommandExt;
+
+    let transport = TokioChildProcess::new(
+        Command::new("npx").configure(|cmd| {
+            cmd.arg("-y").arg("@modelcontextprotocol/server-everything");
+        })
+    )?;
+
+    let service = ().serve(transport).await?;
+    ```
+  </Tab>
+
+  <Tab title="HTTP/SSE (Remote Server)">
+    **Best for:** Connecting to remote web servers
+
+    ```rust
+    use vulcan::transport::SseClient;
+
+    let transport = SseClient::new("http://localhost:8080/sse")?;
+    let service = ().serve(transport).await?;
+    ```
+  </Tab>
+
+  <Tab title="Custom AsyncRead/AsyncWrite">
+    **Best for:** Custom connection types (Unix sockets, pipes, etc.)
+
+    ```rust
+    use vulcan::service::ServiceExt;
+    use tokio::net::UnixStream;
+
+    let stream = UnixStream::connect("/tmp/my-mcp.sock").await?;
+    let (reader, writer) = stream.into_split();
+
+    let service = ().serve((reader, writer)).await?;
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+The `()` type implements `ClientHandler` with sensible defaults. For custom client behavior, implement `ClientHandler` on your own struct.
+</Tip>
+
+### 3. Discovering Server Capabilities
+
+After connecting, query what the server supports:
+
+```rust
+// Get server info
+let info = service.get_server_info().await?;
+println!("Server: {} v{}", info.server_info.name, info.server_info.version);
+println!("Capabilities: {:#?}", info.capabilities);
+
+// List available tools
+let tools_result = service.list_tools(Default::default()).await?;
+for tool in tools_result.tools {
+    println!("Tool: {} - {}", tool.name, tool.description.unwrap_or_default());
+    println!("  Schema: {:#?}", tool.input_schema);
+}
+
+// List resources (if supported)
+if info.capabilities.resources.is_some() {
+    let resources = service.list_resources(Default::default()).await?;
+    println!("Resources: {:#?}", resources);
+}
+
+// List prompts (if supported)
+if info.capabilities.prompts.is_some() {
+    let prompts = service.list_prompts(Default::default()).await?;
+    println!("Prompts: {:#?}", prompts);
+}
+```
+
+### 4. Calling Tools
+
+Use `call_tool()` to invoke server tools:
+
+<CodeGroup>
+
+```rust Simple Call
+use vulcan::model::CallToolRequestParam;
+
+let result = service.call_tool(CallToolRequestParam {
+    name: "get_weather".into(),
+    arguments: None,
+}).await?;
+
+println!("Weather: {:#?}", result);
+```
+
+```rust With Parameters
+use serde_json::json;
+
+let result = service.call_tool(CallToolRequestParam {
+    name: "search".into(),
+    arguments: Some(json!({
+        "query": "Rust MCP",
+        "limit": 10
+    }).as_object().cloned().unwrap()),
+}).await?;
+
+match result.is_error {
+    Some(true) => eprintln!("Tool error: {:#?}", result.content),
+    _ => println!("Results: {:#?}", result.content),
+}
+```
+
+```rust Error Handling
+use vulcan::ErrorData;
+
+let result = service.call_tool(CallToolRequestParam {
+    name: "divide".into(),
+    arguments: Some(json!({
+        "a": 10,
+        "b": 0
+    }).as_object().cloned().unwrap()),
+}).await;
+
+match result {
+    Ok(tool_result) => {
+        if tool_result.is_error == Some(true) {
+            eprintln!("Tool returned error: {:#?}", tool_result.content);
+        } else {
+            println!("Success: {:#?}", tool_result.content);
+        }
+    }
+    Err(e) => {
+        eprintln!("RPC error: {}", e);
+    }
+}
+```
+
+</CodeGroup>
+
+### 5. Handling Responses
+
+Tool responses use the `CallToolResult` type:
+
+```rust
+use vulcan::model::{CallToolResult, Content, TextContent};
+
+let result: CallToolResult = service.call_tool(...).await?;
+
+// Check if tool execution had an error
+if result.is_error == Some(true) {
+    eprintln!("Tool error!");
+}
+
+// Process content
+for content in result.content {
+    match content {
+        Content::Text(TextContent { text, .. }) => {
+            println!("Text response: {}", text);
+        }
+        Content::Image(img) => {
+            println!("Image response: {} ({})", img.data, img.mime_type);
+        }
+        Content::Resource(res) => {
+            println!("Resource response: {}", res.uri);
+        }
+    }
+}
+```
+
+<Tip>
+Most tools return `Content::Text` with JSON-serialized data. Use `serde_json::from_str()` to deserialize.
+</Tip>
+
+## Advanced Features
+
+### Custom ClientHandler Implementation
+
+For advanced use cases, implement `ClientHandler` on your own struct:
+
+```rust
+use vulcan::{ClientHandler, model::*, ErrorData, service::RequestContext, RoleClient};
+
+#[derive(Clone)]
+pub struct MyClient {
+    config: Arc<Config>,
+}
+
+#[async_trait::async_trait]
+impl ClientHandler for MyClient {
+    fn get_info(&self) -> ClientInfo {
+        ClientInfo {
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            capabilities: ClientCapabilities {
+                experimental: None,
+                roots: None,
+                sampling: None,
+            },
+            client_info: Implementation {
+                name: "my-client".to_string(),
+                version: "1.0.0".to_string(),
+                ..Default::default()
+            },
+        }
+    }
+
+    // Optional: Override notification handlers
+    async fn notify_progress(
+        &self,
+        notification: ProgressNotificationParam,
+        _context: RequestContext<RoleClient>,
+    ) -> Result<(), ErrorData> {
+        println!("Progress: {} - {}",
+            notification.progress_token,
+            notification.progress
+        );
+        Ok(())
+    }
+}
+
+// Use custom client
+let service = MyClient::new(config).serve(transport).await?;
+```
+
+### Pagination
+
+Handle paginated results from `list_tools`, `list_resources`, etc.:
+
+```rust
+use vulcan::model::{ListToolsRequest, Cursor};
+
+let mut cursor: Option<Cursor> = None;
+let mut all_tools = Vec::new();
+
+loop {
+    let request = ListToolsRequest { cursor: cursor.clone() };
+    let result = service.list_tools(request).await?;
+
+    all_tools.extend(result.tools);
+
+    match result.next_cursor {
+        Some(next) => cursor = Some(next),
+        None => break,
+    }
+}
+
+println!("Total tools: {}", all_tools.len());
+```
+
+### Concurrent Tool Calls
+
+Call multiple tools in parallel:
+
+```rust
+use futures::future::join_all;
+
+let tool_calls = vec![
+    service.call_tool(CallToolRequestParam {
+        name: "get_weather".into(),
+        arguments: Some(json!({"city": "NYC"}).as_object().cloned().unwrap()),
+    }),
+    service.call_tool(CallToolRequestParam {
+        name: "get_weather".into(),
+        arguments: Some(json!({"city": "SF"}).as_object().cloned().unwrap()),
+    }),
+    service.call_tool(CallToolRequestParam {
+        name: "get_weather".into(),
+        arguments: Some(json!({"city": "LA"}).as_object().cloned().unwrap()),
+    }),
+];
+
+let results = join_all(tool_calls).await;
+
+for (i, result) in results.iter().enumerate() {
+    match result {
+        Ok(tool_result) => println!("City {}: {:#?}", i, tool_result),
+        Err(e) => eprintln!("City {} error: {}", i, e),
+    }
+}
+```
+
+### Middleware for Clients
+
+Add observability and retry logic to client calls:
+
+```rust
+use vulcan::{
+    ports::MiddlewareChain,
+    adapters::{LoggingMiddleware, RetryMiddleware, TimeoutMiddleware},
+};
+use std::sync::Arc;
+use std::time::Duration;
+
+// Create middleware chain
+let mut chain = MiddlewareChain::new();
+chain.add(Arc::new(LoggingMiddleware::new()));
+chain.add(Arc::new(TimeoutMiddleware::new(Duration::from_secs(30))));
+chain.add(Arc::new(RetryMiddleware::new(3)));
+
+// TODO: Middleware integration for clients is coming in future release
+// Currently middleware is server-side only
+```
+
+<Note>
+Client-side middleware support is planned for a future release. Currently, middleware is only available on the server side.
+</Note>
+
+## Testing Your Client
+
+### Integration Testing
+
+Test against a real server:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vulcan::{service::ServiceExt, transport::TokioChildProcess};
+    use tokio::process::Command;
+
+    #[tokio::test]
+    async fn test_client_calls_server() {
+        // Spawn server
+        let transport = TokioChildProcess::new(
+            Command::new("cargo")
+                .arg("run")
+                .arg("--bin")
+                .arg("my-server")
+        ).unwrap();
+
+        let service = ().serve(transport).await.unwrap();
+
+        // Test tool call
+        let result = service.call_tool(CallToolRequestParam {
+            name: "echo".into(),
+            arguments: Some(serde_json::json!({
+                "message": "Hello"
+            }).as_object().cloned().unwrap()),
+        }).await.unwrap();
+
+        assert_eq!(result.is_error, Some(false));
+    }
+}
+```
+
+### Mock Server
+
+For unit testing without a real server, use in-process transport:
+
+```rust
+use vulcan::transport::duplex;
+
+// Create in-process duplex transport
+let (client_transport, server_transport) = duplex();
+
+// Spawn server in background
+tokio::spawn(async move {
+    let server = MyServer::new();
+    server.serve(server_transport).await
+});
+
+// Test with client
+let service = ().serve(client_transport).await?;
+let result = service.call_tool(...).await?;
+```
+
+## Common Patterns
+
+### Request-Response Pattern
+
+```rust
+async fn fetch_data(service: &impl ClientHandler, query: &str)
+    -> Result<Vec<String>, Box<dyn std::error::Error>>
+{
+    let result = service.call_tool(CallToolRequestParam {
+        name: "search".into(),
+        arguments: Some(json!({ "query": query }).as_object().cloned().unwrap()),
+    }).await?;
+
+    // Parse response
+    if let Some(Content::Text(text)) = result.content.first() {
+        let data: Vec<String> = serde_json::from_str(&text.text)?;
+        Ok(data)
+    } else {
+        Err("Unexpected response format".into())
+    }
+}
+```
+
+### Retry on Failure
+
+```rust
+use std::time::Duration;
+use tokio::time::sleep;
+
+async fn call_with_retry(
+    service: &impl ClientHandler,
+    tool_name: &str,
+    max_retries: usize,
+) -> Result<CallToolResult, ErrorData> {
+    let mut attempts = 0;
+
+    loop {
+        match service.call_tool(CallToolRequestParam {
+            name: tool_name.into(),
+            arguments: None,
+        }).await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                attempts += 1;
+                if attempts >= max_retries {
+                    return Err(e);
+                }
+                sleep(Duration::from_millis(100 * attempts as u64)).await;
+            }
+        }
+    }
+}
+```
+
+### Connection Pool
+
+For multiple concurrent connections:
+
+```rust
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+
+struct ClientPool {
+    server_path: String,
+    max_connections: usize,
+    semaphore: Arc<Semaphore>,
+}
+
+impl ClientPool {
+    fn new(server_path: String, max_connections: usize) -> Self {
+        Self {
+            server_path,
+            max_connections,
+            semaphore: Arc::new(Semaphore::new(max_connections)),
+        }
+    }
+
+    async fn execute<F, T>(&self, f: F) -> Result<T, Box<dyn std::error::Error>>
+    where
+        F: FnOnce(Box<dyn ClientHandler>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, Box<dyn std::error::Error>>> + Send>> + Send,
+        T: Send,
+    {
+        let _permit = self.semaphore.acquire().await?;
+
+        let transport = TokioChildProcess::new(
+            Command::new(&self.server_path)
+        )?;
+
+        let service = ().serve(transport).await?;
+        f(Box::new(service)).await
+    }
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Handle Connection Failures Gracefully">
+    Always handle connection errors and provide fallback behavior:
+
+    ```rust
+    match ().serve(transport).await {
+        Ok(service) => {
+            // Use service
+        }
+        Err(e) => {
+            eprintln!("Failed to connect to server: {}", e);
+            // Provide fallback or retry logic
+        }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Validate Tool Results">
+    Check `is_error` field before processing results:
+
+    ```rust
+    let result = service.call_tool(...).await?;
+
+    if result.is_error == Some(true) {
+        return Err(format!("Tool error: {:#?}", result.content).into());
+    }
+
+    // Safe to process result.content
+    ```
+  </Accordion>
+
+  <Accordion title="Use Timeouts">
+    Prevent hanging on slow servers:
+
+    ```rust
+    use tokio::time::{timeout, Duration};
+
+    let result = timeout(
+        Duration::from_secs(30),
+        service.call_tool(...)
+    ).await??;
+    ```
+  </Accordion>
+
+  <Accordion title="Cache Server Capabilities">
+    Avoid repeated `list_tools()` calls:
+
+    ```rust
+    struct CachedClient {
+        service: Box<dyn ClientHandler>,
+        tools: Arc<RwLock<Option<Vec<Tool>>>>,
+    }
+
+    impl CachedClient {
+        async fn get_tools(&self) -> Result<Vec<Tool>, ErrorData> {
+            // Check cache first
+            {
+                let tools = self.tools.read().await;
+                if let Some(cached) = &*tools {
+                    return Ok(cached.clone());
+                }
+            }
+
+            // Fetch and cache
+            let result = self.service.list_tools(Default::default()).await?;
+            let mut tools = self.tools.write().await;
+            *tools = Some(result.tools.clone());
+            Ok(result.tools)
+        }
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+<Warning>
+**Server Not Found**
+
+If you get "No such file or directory" when using `TokioChildProcess`:
+
+```rust
+// ❌ Wrong - relative path may not resolve
+let transport = TokioChildProcess::new(Command::new("./my-server"))?;
+
+// ✅ Correct - use absolute path or ensure it's in PATH
+let transport = TokioChildProcess::new(
+    Command::new("/absolute/path/to/my-server")
+)?;
+
+// ✅ Or use current_dir()
+let transport = TokioChildProcess::new(
+    Command::new("my-server")
+        .current_dir(std::env::current_dir()?)
+)?;
+```
+</Warning>
+
+<Tip>
+See the [Troubleshooting Guide](/troubleshooting/overview) for complete error solutions.
+</Tip>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Building a Server" icon="server" href="/guides/building-server">
+    Learn how to build MCP servers
+  </Card>
+  <Card title="Error Handling" icon="triangle-exclamation" href="/guides/error-handling">
+    Master error handling patterns
+  </Card>
+  <Card title="Testing" icon="vial" href="/guides/testing">
+    Test your MCP clients
+  </Card>
+  <Card title="Transports" icon="network-wired" href="/concepts/transports">
+    Explore all transport options
+  </Card>
+</CardGroup>

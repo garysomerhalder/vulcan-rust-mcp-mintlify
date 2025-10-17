@@ -1,0 +1,309 @@
+---
+title: Core Concepts Overview
+description: 'Understanding the building blocks of Vulcan'
+---
+
+# Core Concepts
+
+Vulcan provides a clean, type-safe API for building MCP servers and clients. This overview introduces the core concepts you'll work with.
+
+## The MCP Model
+
+The **Model Context Protocol** defines three main capabilities:
+
+<CardGroup cols={3}>
+  <Card title="Tools" icon="wrench" href="/concepts/tools">
+    AI-callable functions that perform actions
+  </Card>
+  <Card title="Resources" icon="database" href="/concepts/resources">
+    Data sources that provide context to AI
+  </Card>
+  <Card title="Prompts" icon="message" href="/concepts/prompts">
+    Template-driven interaction patterns
+  </Card>
+</CardGroup>
+
+## Architecture Layers
+
+Vulcan is built with **Domain-Driven Design + Hexagonal Architecture**:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Your Application                     │
+│                  (Business Logic)                       │
+└─────────────────────────────────────────────────────────┘
+                           │
+┌─────────────────────────────────────────────────────────┐
+│                   Ports (Traits)                        │
+│  ServerHandler │ Middleware │ Transport │ EventPublisher│
+└─────────────────────────────────────────────────────────┘
+                           │
+┌─────────────────────────────────────────────────────────┐
+│              Adapters (Implementations)                 │
+│  LoggingMiddleware │ StdioTransport │ SSETransport      │
+└─────────────────────────────────────────────────────────┘
+                           │
+┌─────────────────────────────────────────────────────────┐
+│                    Infrastructure                       │
+│              (Tokio, HTTP, File System)                 │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Domain Layer
+
+**Pure business logic** - no infrastructure dependencies.
+
+- **Entities**: `Tool`, `Resource`, `Prompt` - core business objects with identity
+- **Value Objects**: `ToolName`, `ResourceUri` - immutable validated primitives
+- **Domain Services**: `ToolExecutor`, `ResourceLoader` - domain behaviors
+
+Example:
+```rust
+use vulcan::domain::{Tool, ToolName};
+
+let tool = Tool::new(
+    "calculate".to_string(),
+    "Perform calculations".to_string(),
+    schema,
+)?;
+
+let name: &ToolName = tool.name(); // Validated value object
+```
+
+### Ports Layer
+
+**Trait boundaries** that define "what" the domain needs, not "how" it's implemented.
+
+- `ServerHandler` - Handle MCP requests
+- `Middleware` - Intercept requests/responses
+- `Transport` - Send/receive messages
+- `EventPublisher` - Publish domain events
+
+Example:
+```rust
+use vulcan::ports::Middleware;
+
+#[async_trait::async_trait]
+pub trait Middleware: Send + Sync {
+    async fn before_execute(&self, tool: &Tool, ...) -> Result<(), ErrorData>;
+    async fn after_execute(&self, tool: &Tool, ...) -> Result<(), ErrorData>;
+    async fn on_error(&self, tool: &Tool, ...) -> Result<(), ErrorData>;
+}
+```
+
+### Adapters Layer
+
+**Concrete implementations** of port traits - infrastructure concerns.
+
+- `LoggingMiddleware`, `MetricsMiddleware`, `RetryMiddleware`
+- `StdioTransport`, `SSETransport`, `HTTPTransport`
+- `TracingEventPublisher`
+- `InMemoryToolRepository`
+
+Example:
+```rust
+use vulcan::adapters::{LoggingMiddleware, RetryMiddleware};
+use std::sync::Arc;
+
+let logging = Arc::new(LoggingMiddleware::new());
+let retry = Arc::new(RetryMiddleware::new(3));
+
+chain.add(logging);
+chain.add(retry);
+```
+
+## Key Concepts
+
+### 1. Transports
+
+**Transports** handle communication between client and server. Vulcan supports multiple transports:
+
+<CardGroup cols={2}>
+  <Card title="Stdio" icon="terminal">
+    Standard input/output - **most common for Claude Desktop**
+  </Card>
+  <Card title="HTTP/SSE" icon="globe">
+    Server-Sent Events over HTTP for web-based servers
+  </Card>
+  <Card title="Child Process" icon="play">
+    Spawn MCP servers as child processes
+  </Card>
+  <Card title="Custom" icon="code">
+    Build your own from AsyncRead/AsyncWrite
+  </Card>
+</CardGroup>
+
+Learn more: [Transports Guide](/concepts/transports)
+
+### 2. Middleware
+
+**Middleware** provides cross-cutting concerns like logging, metrics, retry, and timeout.
+
+```rust
+use vulcan::ports::MiddlewareChain;
+use vulcan::adapters::*;
+
+let mut chain = MiddlewareChain::new();
+chain.add(Arc::new(LoggingMiddleware::new()));
+chain.add(Arc::new(MetricsMiddleware::new()));
+chain.add(Arc::new(TimeoutMiddleware::new(Duration::from_secs(30))));
+chain.add(Arc::new(RetryMiddleware::new(3)));
+```
+
+Middleware wraps all tool executions:
+1. `before_execute` - runs before the tool
+2. **Tool execution**
+3. `after_execute` - runs after success
+4. `on_error` - runs on failure
+
+Learn more: [Middleware Guide](/concepts/middleware)
+
+### 3. Error Handling
+
+Vulcan provides **ergonomic error conversion** via `ErrorData`:
+
+```rust
+use vulcan::ErrorData;
+
+// Automatic conversions:
+let json_error: serde_json::Error = ...;
+let error_data: ErrorData = json_error.into(); // ✅ Just works!
+
+// Custom errors:
+impl From<MyError> for ErrorData {
+    fn from(error: MyError) -> Self {
+        ErrorData::internal(error)
+    }
+}
+
+// Then use .await? everywhere:
+let result = my_async_call().await?; // Auto-converts to ErrorData
+```
+
+**ErrorData constructors:**
+- `ErrorData::internal(e)` - Internal server error
+- `ErrorData::invalid_input(msg)` - Invalid parameters
+- `ErrorData::not_found(msg)` - Resource not found
+- `ErrorData::method_not_found::<Method>()` - Unsupported operation
+
+### 4. Async by Default
+
+All Vulcan APIs are **async-first** using tokio:
+
+```rust
+#[tool(description = "Fetch data")]
+async fn fetch_data(&self, url: String) -> Result<Data, ErrorData> {
+    let response = reqwest::get(&url).await?; // ✅ Async operations
+    let data = response.json().await?;
+    Ok(data)
+}
+```
+
+### 5. Type Safety
+
+Vulcan leverages **Rust's type system** for compile-time safety:
+
+- Tool parameters validated at compile time
+- JSON schema generation from types
+- Transport errors typed and composable
+- Middleware context strongly typed
+
+```rust
+use schemars::JsonSchema;
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct UserQuery {
+    name: String,
+    age: Option<i32>, // Optional parameter auto-detected!
+}
+
+#[tool(description = "Query user")]
+async fn query_user(&self, query: UserQuery) -> Result<User, ErrorData> {
+    // Type-safe parameter access
+    let name = query.name;
+    let age = query.age.unwrap_or(18);
+    // ...
+}
+```
+
+## Development Workflow
+
+### Server Development
+
+1. **Define your domain** - Create your server struct with state
+2. **Add tools** - Use `#[tool]` macro on async methods
+3. **Implement ServerHandler** - Use `#[tool_handler]` macro
+4. **Add middleware** (optional) - Logging, metrics, retry
+5. **Choose transport** - Stdio for Claude Desktop, HTTP for web
+6. **Serve** - Call `.serve(transport).await`
+
+### Client Development
+
+1. **Choose transport** - How to connect to the server
+2. **Create service** - Call `().serve(transport).await`
+3. **List capabilities** - `service.list_tools().await`
+4. **Call tools** - `service.call_tool(params).await`
+5. **Handle responses** - Process `CallToolResult`
+
+## Testing Philosophy
+
+Vulcan uses **Integration-First Testing**:
+
+- ✅ Test against real transports (stdio, SSE, HTTP)
+- ✅ Test with actual middleware chains
+- ✅ Test end-to-end flows
+- ❌ No mocks or test doubles
+
+Example:
+```rust
+#[tokio::test]
+async fn test_tool_execution_with_middleware() {
+    let server = MyServer::new();
+
+    let mut chain = MiddlewareChain::new();
+    chain.add(Arc::new(LoggingMiddleware::new()));
+
+    let (client, server_handle) = spawn_test_server(server, chain);
+
+    let result = client.call_tool(...).await.unwrap();
+    assert_eq!(result.content[0].text, "expected");
+
+    server_handle.shutdown().await.unwrap();
+}
+```
+
+## Performance Characteristics
+
+Vulcan is designed for **production use**:
+
+- **Zero-copy** where possible (JSON streaming)
+- **Async I/O** via tokio (scales to thousands of connections)
+- **Minimal allocations** (arena allocation for requests)
+- **Middleware overhead** < 10μs per request
+- **Transport overhead** < 100μs for stdio
+
+Benchmark results available in `benches/`.
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Tools" icon="wrench" href="/concepts/tools">
+    Learn how to create and use tools
+  </Card>
+  <Card title="Resources" icon="database" href="/concepts/resources">
+    Expose data sources to AI
+  </Card>
+  <Card title="Prompts" icon="message" href="/concepts/prompts">
+    Build template-driven interactions
+  </Card>
+  <Card title="Transports" icon="network-wired" href="/concepts/transports">
+    Choose the right transport
+  </Card>
+  <Card title="Middleware" icon="layer-group" href="/concepts/middleware">
+    Add logging, metrics, and retry
+  </Card>
+  <Card title="Building a Server" icon="server" href="/guides/building-server">
+    In-depth server building guide
+  </Card>
+</CardGroup>

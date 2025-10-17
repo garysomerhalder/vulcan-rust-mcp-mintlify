@@ -1,0 +1,628 @@
+---
+title: Architecture Overview
+description: 'Vulcan DDD + Hexagonal Architecture explained'
+---
+
+# Architecture Overview
+
+Vulcan is built on **Domain-Driven Design (DDD)** and **Hexagonal Architecture** principles for maintainability, testability, and flexibility.
+
+## The Three Layers
+
+```
+┌──────────────────────────────────────────────────┐
+│                  ADAPTERS LAYER                   │
+│         (Infrastructure - How it works)           │
+│                                                   │
+│  • LoggingMiddleware     • MetricsMiddleware     │
+│  • TracingEventPublisher • InMemoryToolRepository│
+│  • TimeoutMiddleware     • RetryMiddleware       │
+└─────────────────┬────────────────────────────────┘
+                  │  Implements
+                  ▼
+┌──────────────────────────────────────────────────┐
+│                   PORTS LAYER                     │
+│         (Interfaces - What we need)               │
+│                                                   │
+│  • Middleware trait     • EventPublisher trait    │
+│  • ToolRepository trait • Transport trait         │
+└─────────────────┬────────────────────────────────┘
+                  │  Uses
+                  ▼
+┌──────────────────────────────────────────────────┐
+│                   DOMAIN LAYER                    │
+│         (Business Logic - What we do)             │
+│                                                   │
+│  • Tool          • DomainEvent                    │
+│  • ToolName      • ErrorData                      │
+│  • Resource      • Prompt                         │
+└──────────────────────────────────────────────────┘
+```
+
+<CardGroup cols={3}>
+  <Card title="Domain Layer" icon="cube">
+    Pure business logic, no dependencies
+  </Card>
+  <Card title="Ports Layer" icon="plug">
+    Trait definitions, contracts
+  </Card>
+  <Card title="Adapters Layer" icon="cubes">
+    Concrete implementations
+  </Card>
+</CardGroup>
+
+## The Dependency Rule
+
+**Dependencies point inward:**
+
+```
+Adapters → Ports → Domain
+```
+
+The domain never depends on outer layers. This means:
+- Domain has **zero** infrastructure code
+- Ports define **what** the domain needs
+- Adapters provide **how** it works
+
+<Tip>
+This architecture allows you to swap adapters (e.g., InMemory → Postgres) without changing domain logic!
+</Tip>
+
+## Why This Architecture?
+
+<AccordionGroup>
+  <Accordion title="Testability">
+    Test domain logic without infrastructure:
+
+    ```rust
+    // Unit test: No database, no HTTP, pure logic
+    #[test]
+    fn test_tool_validation() {
+        let tool = Tool::new("test", "desc", schema)?;
+        assert_eq!(tool.name().as_str(), "test");
+    }
+    ```
+
+    Test with mock adapters:
+
+    ```rust
+    // Integration test: Mock adapters
+    let mock_repo = MockToolRepository::new();
+    let service = MyService::new(mock_repo);
+    ```
+  </Accordion>
+
+  <Accordion title="Flexibility">
+    Swap implementations easily:
+
+    ```rust
+    // Development: Fast in-memory
+    let repo = InMemoryToolRepository::new();
+
+    // Production: Persistent database
+    let repo = PostgresToolRepository::new(pool);
+
+    // Testing: Controlled mock
+    let repo = MockToolRepository::new();
+
+    // All implement the same ToolRepository trait!
+    ```
+  </Accordion>
+
+  <Accordion title="Maintainability">
+    Clear separation of concerns:
+
+    - Domain: Business rules
+    - Ports: Contracts
+    - Adapters: Infrastructure
+
+    Change infrastructure without touching business logic.
+  </Accordion>
+
+  <Accordion title="Independence">
+    Domain is framework-agnostic:
+
+    ```rust
+    // Domain code has NO imports from:
+    // - tokio, axum, reqwest (infrastructure)
+    // - Database libraries
+    // - HTTP clients
+
+    // Only imports:
+    use serde::{Serialize, Deserialize};  // Data only
+    use thiserror::Error;  // Errors only
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Code Organization
+
+```
+crates/vulcan/src/
+├── domain/              # Business logic (inner)
+│   ├── entities/        # Tool, Resource, Prompt
+│   ├── value_objects/   # ToolName, ResourceUri
+│   ├── services/        # ToolExecutor trait
+│   └── events.rs        # DomainEvent enum
+│
+├── ports/               # Trait definitions (boundary)
+│   ├── middleware.rs    # Middleware trait
+│   ├── events.rs        # EventPublisher trait
+│   ├── repository.rs    # ToolRepository trait
+│   └── mod.rs           # Transport trait
+│
+├── adapters/            # Implementations (outer)
+│   ├── middleware.rs    # Logging, Metrics, etc.
+│   ├── events.rs        # TracingEventPublisher
+│   └── repository.rs    # InMemoryToolRepository
+│
+├── handler/             # Application layer
+│   ├── server.rs        # ServerHandler
+│   └── client.rs        # ClientHandler
+│
+└── transport/           # Transport implementations
+    ├── async_rw.rs      # Stdio transport
+    ├── sse_*.rs         # SSE transport
+    └── streamable_http_*.rs  # HTTP transport
+```
+
+## Design Principles
+
+### 1. Domain-Driven Design (DDD)
+
+Focus on the business domain:
+
+```rust
+// Domain entity: Represents a business concept
+pub struct Tool {
+    name: ToolName,           // Value object
+    description: String,
+    input_schema: Value,
+}
+
+impl Tool {
+    // Domain behavior
+    pub fn validate_params(&self, params: &Value) -> Result<(), ErrorData> {
+        // Business rule: Validate against schema
+    }
+}
+```
+
+### 2. Hexagonal Architecture
+
+Keep domain independent - the hexagon shape represents the domain at the center, with ports as the boundary:
+
+```mermaid
+graph TB
+    subgraph "Driving Adapters (Input)"
+        A1[HTTP Transport<br/>Axum/Hyper]
+        A2[Stdio Transport<br/>Child Process]
+        A3[WebSocket<br/>Transport]
+        A4[SSE Transport]
+    end
+
+    subgraph "Ports Layer (Boundary)"
+        P1[Transport Trait]
+        P2[Middleware Trait]
+        P3[EventPublisher Trait]
+        P4[ToolRepository Trait]
+    end
+
+    subgraph "Domain Layer (Core)"
+        D1[Tool Entity]
+        D2[Resource Entity]
+        D3[Prompt Entity]
+        D4[ToolName ValueObject]
+        D5[ErrorData]
+        D6[DomainEvent]
+    end
+
+    subgraph "Driven Adapters (Output)"
+        AD1[LoggingMiddleware]
+        AD2[MetricsMiddleware]
+        AD3[TracingPublisher]
+        AD4[InMemoryRepo]
+    end
+
+    A1 --> P1
+    A2 --> P1
+    A3 --> P1
+    A4 --> P1
+
+    P1 --> D1
+    P2 --> D1
+    P3 --> D6
+    P4 --> D1
+
+    P2 -.implements.-> AD1
+    P2 -.implements.-> AD2
+    P3 -.implements.-> AD3
+    P4 -.implements.-> AD4
+
+    style D1 fill:#FF6B35
+    style D2 fill:#FF6B35
+    style D3 fill:#FF6B35
+    style D4 fill:#FF6B35
+    style D5 fill:#FF6B35
+    style D6 fill:#FF6B35
+```
+
+**Key insight:** Domain (orange) has zero dependencies on outer layers. All dependencies point inward!
+
+### 3. Ports and Adapters
+
+Ports define contracts, adapters implement them:
+
+```rust
+// Port (trait): What the domain needs
+#[async_trait]
+pub trait EventPublisher: Send + Sync {
+    async fn publish(&self, event: DomainEvent) -> Result<(), ErrorData>;
+}
+
+// Adapter (impl): How we do it
+pub struct TracingEventPublisher;
+
+#[async_trait]
+impl EventPublisher for TracingEventPublisher {
+    async fn publish(&self, event: DomainEvent) -> Result<(), ErrorData> {
+        tracing::info!(?event, "Event published");
+        Ok(())
+    }
+}
+```
+
+## Request Flow Lifecycle
+
+Complete lifecycle of an MCP request from client to server and back:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Transport
+    participant Middleware1 as Logging MW
+    participant Middleware2 as Metrics MW
+    participant Handler as ServerHandler
+    participant Tool as Tool Function
+    participant Domain as Domain Logic
+
+    Client->>Transport: JSON-RPC Request<br/>{method: "tools/call", params: {...}}
+    Transport->>Middleware1: Deserialize + Route
+
+    Note over Middleware1: before_execute()
+    Middleware1->>Middleware1: Log request<br/>correlation_id: uuid
+    Middleware1->>Middleware2: Continue chain
+
+    Note over Middleware2: before_execute()
+    Middleware2->>Middleware2: Record start time<br/>Increment counter
+    Middleware2->>Handler: Continue chain
+
+    Handler->>Tool: Call #[tool] function<br/>with validated params
+    Tool->>Domain: Execute business logic
+    Domain-->>Tool: Result<T, ErrorData>
+    Tool-->>Handler: Serialized JSON result
+
+    Handler->>Middleware2: Return response
+    Note over Middleware2: after_execute()
+    Middleware2->>Middleware2: Record latency<br/>Update metrics
+    Middleware2->>Middleware1: Continue chain
+
+    Note over Middleware1: after_execute()
+    Middleware1->>Middleware1: Log response<br/>duration, status
+    Middleware1->>Transport: Serialize response
+
+    Transport->>Client: JSON-RPC Response<br/>{result: {...}}
+
+    Note over Client,Domain: Error Path (if tool fails)
+    Tool--xHandler: ErrorData
+    Handler->>Middleware2: Error result
+    Note over Middleware2: on_error()
+    Middleware2->>Middleware1: Continue error chain
+    Note over Middleware1: on_error()
+    Middleware1->>Transport: Serialize error
+    Transport->>Client: JSON-RPC Error Response
+```
+
+<Tip>
+**Notice:** Middleware wraps the request in both directions - `before_execute` on the way in, `after_execute` on the way out. This enables powerful cross-cutting concerns like logging, metrics, and tracing.
+</Tip>
+
+## Middleware Chain Processing
+
+How multiple middleware compose to process a single request:
+
+```mermaid
+graph TD
+    Start[Incoming Request] --> MW1_Before[Middleware 1<br/>before_execute]
+
+    MW1_Before --> |Add correlation_id| MW2_Before[Middleware 2<br/>before_execute]
+
+    MW2_Before --> |Start timer| MW3_Before[Middleware 3<br/>before_execute]
+
+    MW3_Before --> |Validate auth| Execute[Execute Tool Function]
+
+    Execute --> |Success| MW3_After[Middleware 3<br/>after_execute]
+    Execute --> |Error| MW3_Error[Middleware 3<br/>on_error]
+
+    MW3_After --> |Log result| MW2_After[Middleware 2<br/>after_execute]
+    MW3_Error --> |Transform error| MW2_Error[Middleware 2<br/>on_error]
+
+    MW2_After --> |Record metrics| MW1_After[Middleware 1<br/>after_execute]
+    MW2_Error --> |Increment error counter| MW1_Error[Middleware 1<br/>on_error]
+
+    MW1_After --> |Finalize| Success[Return Success Response]
+    MW1_Error --> |Finalize| Error[Return Error Response]
+
+    style Execute fill:#FF6B35
+    style Success fill:#4CAF50
+    style Error fill:#F44336
+```
+
+**Middleware Context** flows through the entire chain:
+```rust
+pub struct MiddlewareContext {
+    pub correlation_id: String,        // Unique request ID
+    pub metadata: HashMap<String, String>,  // Shared state
+    pub start_time: Option<Instant>,   // For latency tracking
+}
+```
+
+## Tool Execution Flow
+
+Detailed flow of how a tool is executed with macro expansion:
+
+```mermaid
+graph TB
+    Start[User calls tool] --> Macro[#tool macro expansion]
+
+    Macro --> Extract[Extract parameters<br/>from JSON]
+
+    Extract --> Validate[Validate against<br/>input_schema]
+
+    Validate --> |Valid| Deserialize[Deserialize to<br/>Rust types]
+    Validate --> |Invalid| ErrSchema[ErrorData::invalid_input]
+
+    Deserialize --> |Success| Execute[Execute async fn]
+    Deserialize --> |Failure| ErrDeser[ErrorData::internal<br/>serde_json::Error]
+
+    Execute --> UserCode[User business logic]
+
+    UserCode --> |Result::Ok| Serialize[Serialize return value<br/>to JSON]
+    UserCode --> |Result::Err| ErrUser[User ErrorData]
+
+    Serialize --> |Success| Wrap[Wrap in CallToolResult]
+    Serialize --> |Failure| ErrSer[ErrorData::internal<br/>serde_json::Error]
+
+    Wrap --> Response[JSON-RPC Response]
+
+    ErrSchema --> ErrResponse[JSON-RPC Error]
+    ErrDeser --> ErrResponse
+    ErrUser --> ErrResponse
+    ErrSer --> ErrResponse
+
+    Response --> Client[Return to client]
+    ErrResponse --> Client
+
+    style UserCode fill:#FF6B35
+    style Response fill:#4CAF50
+    style ErrResponse fill:#F44336
+```
+
+**Example macro expansion:**
+```rust
+// What you write:
+#[tool(description = "Add numbers")]
+async fn add(&self, a: i32, b: i32) -> Result<i32, ErrorData> {
+    Ok(a + b)
+}
+
+// What the macro generates (simplified):
+async fn add_impl(&self, params: serde_json::Value) -> Result<CallToolResult, ErrorData> {
+    // 1. Validate against schema
+    validate_schema(&params, &self.add_schema())?;
+
+    // 2. Deserialize parameters
+    let a: i32 = params["a"].as_i64().ok_or(ErrorData::invalid_input("a"))? as i32;
+    let b: i32 = params["b"].as_i64().ok_or(ErrorData::invalid_input("b"))? as i32;
+
+    // 3. Call user function
+    let result = self.add(a, b).await?;
+
+    // 4. Serialize result
+    let json = serde_json::to_value(result)?;
+
+    // 5. Wrap in response
+    Ok(CallToolResult {
+        content: vec![Content::text(json.to_string())],
+        is_error: false,
+        ..Default::default()
+    })
+}
+```
+
+## Component Interaction Diagram
+
+How all major components interact in a running system:
+
+```mermaid
+graph TB
+    subgraph "Client Layer"
+        CLI[CLI Application]
+        Web[Web Browser]
+    end
+
+    subgraph "Transport Layer"
+        StdioT[Stdio Transport]
+        HttpT[HTTP Transport]
+        WsT[WebSocket Transport]
+    end
+
+    subgraph "Middleware Layer"
+        Chain[Middleware Chain]
+        Log[Logging]
+        Metrics[Metrics]
+        Retry[Retry]
+        Timeout[Timeout]
+    end
+
+    subgraph "Application Layer"
+        ServerH[ServerHandler]
+        ToolRouter[ToolRouter]
+        ResourceRouter[ResourceRouter]
+        PromptRouter[PromptRouter]
+    end
+
+    subgraph "Domain Layer"
+        ToolE[Tool Entity]
+        ResourceE[Resource Entity]
+        PromptE[Prompt Entity]
+        Events[DomainEvent]
+    end
+
+    subgraph "Infrastructure Layer"
+        EventPub[EventPublisher]
+        Repo[ToolRepository]
+    end
+
+    CLI --> StdioT
+    Web --> HttpT
+    Web --> WsT
+
+    StdioT --> Chain
+    HttpT --> Chain
+    WsT --> Chain
+
+    Chain --> Log
+    Chain --> Metrics
+    Chain --> Retry
+    Chain --> Timeout
+
+    Log --> ServerH
+    Metrics --> ServerH
+    Retry --> ServerH
+    Timeout --> ServerH
+
+    ServerH --> ToolRouter
+    ServerH --> ResourceRouter
+    ServerH --> PromptRouter
+
+    ToolRouter --> ToolE
+    ResourceRouter --> ResourceE
+    PromptRouter --> PromptE
+
+    ToolE --> Events
+    ResourceE --> Events
+    PromptE --> Events
+
+    Events --> EventPub
+    ToolRouter --> Repo
+
+    style ToolE fill:#FF6B35
+    style ResourceE fill:#FF6B35
+    style PromptE fill:#FF6B35
+    style Events fill:#FF6B35
+```
+
+## Key Benefits
+
+| Benefit | Without Architecture | With Architecture |
+|---------|---------------------|-------------------|
+| **Testing** | Mock entire infrastructure | Mock only adapters |
+| **Changes** | Ripple through codebase | Isolated to layers |
+| **Understanding** | Mixed concerns | Clear boundaries |
+| **Reusability** | Tightly coupled | Loosely coupled |
+
+## Traffic-Light Development
+
+Vulcan was built using Traffic-Light methodology:
+
+<Steps>
+  <Step title="🔴 RED - Tests First">
+    Write tests that demonstrate requirements
+    ```rust
+    #[test]
+    fn test_tool_registration() {
+        // Test fails - feature doesn't exist yet
+    }
+    ```
+  </Step>
+
+  <Step title="🟡 YELLOW - Make It Work">
+    Minimal implementation to pass tests
+    ```rust
+    impl ToolRepository {
+        fn register(&mut self, tool: Tool) {
+            self.tools.insert(tool.name(), tool);
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="🟢 GREEN - Make It Right">
+    Refactor, add error handling, documentation
+    ```rust
+    impl ToolRepository {
+        /// Registers a tool in the repository
+        fn register(&mut self, tool: Tool) -> Result<(), ErrorData> {
+            if self.tools.contains_key(tool.name()) {
+                return Err(ErrorData::invalid_input("Tool already exists"));
+            }
+            self.tools.insert(tool.name(), tool);
+            Ok(())
+        }
+    }
+    ```
+  </Step>
+</Steps>
+
+## Integration-First Testing
+
+All tests use real implementations:
+
+```rust
+// ✅ Real transport, real middleware
+#[tokio::test]
+async fn test_server_with_middleware() {
+    let (client_transport, server_transport) = duplex();  // Real transport
+
+    let mut chain = MiddlewareChain::new();
+    chain.add(Arc::new(LoggingMiddleware::new()));  // Real middleware
+
+    let server = MyServer::new();
+    server.serve_with_middleware(server_transport, chain).await?;
+}
+
+// ❌ NO mocks in Vulcan's test suite
+```
+
+## Evolution
+
+Vulcan evolved through 6 phases:
+
+1. **Phase 1**: Domain Layer - Entities, value objects
+2. **Phase 2**: Ports Layer - Trait definitions
+3. **Phase 3**: Middleware System - Composable cross-cutting concerns
+4. **Phase 4**: Application Layer - Service builder, use cases
+5. **Phase 5**: Macro Refactor - Direct parameters, auto-serialization
+6. **Phase 6**: Documentation - Comprehensive guides
+
+<Tip>
+Every phase followed Traffic-Light: RED → YELLOW → GREEN
+</Tip>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Domain Layer" icon="cube" href="/architecture/domain-layer">
+    Deep-dive into domain entities
+  </Card>
+  <Card title="Ports Layer" icon="plug" href="/architecture/ports-layer">
+    Understand port traits
+  </Card>
+  <Card title="Adapters Layer" icon="cubes" href="/architecture/adapters-layer">
+    Explore adapter implementations
+  </Card>
+  <Card title="Examples" icon="code" href="/examples-docs/ports-adapters">
+    See architecture in action
+  </Card>
+</CardGroup>

@@ -1,0 +1,757 @@
+---
+title: Testing
+description: 'Comprehensive testing guide for Vulcan MCP servers and clients'
+---
+
+# Testing MCP Applications
+
+Learn how to test your MCP servers and clients with Vulcan's integration-first testing approach.
+
+## Testing Philosophy
+
+Vulcan uses **Integration-First Testing**:
+
+<CardGroup cols={2}>
+  <Card title="Real Transports" icon="network-wired">
+    Test against actual transport implementations, not mocks
+  </Card>
+  <Card title="End-to-End" icon="diagram-project">
+    Test the full request/response cycle
+  </Card>
+  <Card title="Cross-Language" icon="globe">
+    Verify interop with Python/JS MCP servers
+  </Card>
+  <Card title="Fast Feedback" icon="bolt">
+    In-process testing for quick iteration
+  </Card>
+</CardGroup>
+
+<Warning>
+**No Mocks Policy**
+
+Vulcan tests use real transport implementations, not test doubles. This ensures we test the actual behavior, not mocked behavior.
+</Warning>
+
+## Quick Start
+
+### Basic Server Test
+
+```rust
+use vulcan::transport::duplex;
+use vulcan::service::ServiceExt;
+use vulcan::model::CallToolRequestParam;
+
+#[tokio::test]
+async fn test_counter_server() {
+    // 1. Create in-process transport
+    let (client_transport, server_transport) = duplex();
+
+    // 2. Spawn server in background
+    let server = Counter::new();
+    tokio::spawn(async move {
+        server.serve(server_transport).await
+    });
+
+    // 3. Connect client
+    let client = ().serve(client_transport).await.unwrap();
+
+    // 4. Call tool
+    let result = client.call_tool(CallToolRequestParam {
+        name: "increment".into(),
+        arguments: None,
+    }).await.unwrap();
+
+    // 5. Assert response
+    assert_eq!(result.is_error, Some(false));
+}
+```
+
+## Test Utilities
+
+### In-Process Transport (duplex)
+
+Create paired transports for testing without external processes:
+
+```rust
+use vulcan::transport::duplex;
+
+// Returns (client_transport, server_transport)
+let (client_transport, server_transport) = duplex();
+```
+
+<Tip>
+`duplex()` creates an in-memory bidirectional channel. Perfect for fast integration tests!
+</Tip>
+
+### Helper Functions
+
+Create reusable test helpers:
+
+```rust
+use vulcan::service::ServiceExt;
+use std::future::Future;
+
+/// Spawn a test server and return client + server handle
+async fn spawn_test_server<S>(server: S)
+    -> (impl ServiceExt, tokio::task::JoinHandle<()>)
+where
+    S: ServerHandler + Send + Sync + 'static,
+{
+    let (client_transport, server_transport) = duplex();
+
+    let handle = tokio::spawn(async move {
+        server.serve(server_transport).await.ok();
+    });
+
+    let client = ().serve(client_transport).await.unwrap();
+
+    (client, handle)
+}
+
+// Use in tests
+#[tokio::test]
+async fn test_my_server() {
+    let (client, _handle) = spawn_test_server(MyServer::new()).await;
+
+    let result = client.call_tool(...).await.unwrap();
+    assert!(result.is_error == Some(false));
+}
+```
+
+## Testing Servers
+
+### Testing Tools
+
+<Tabs>
+  <Tab title="Simple Tool">
+    ```rust
+    #[tokio::test]
+    async fn test_echo_tool() {
+        let server = MyServer::new();
+        let (client, _handle) = spawn_test_server(server).await;
+
+        let result = client.call_tool(CallToolRequestParam {
+            name: "echo".into(),
+            arguments: Some(serde_json::json!({
+                "message": "Hello, World!"
+            }).as_object().cloned().unwrap()),
+        }).await.unwrap();
+
+        // Verify response
+        assert_eq!(result.is_error, Some(false));
+
+        if let Some(Content::Text(text)) = result.content.first() {
+            assert_eq!(text.text, "Hello, World!");
+        } else {
+            panic!("Expected text content");
+        }
+    }
+    ```
+  </Tab>
+
+  <Tab title="Tool with State">
+    ```rust
+    #[tokio::test]
+    async fn test_stateful_counter() {
+        let (client, _handle) = spawn_test_server(Counter::new()).await;
+
+        // First increment
+        let result1 = client.call_tool(CallToolRequestParam {
+            name: "increment".into(),
+            arguments: None,
+        }).await.unwrap();
+
+        assert_eq!(extract_number(&result1), 1);
+
+        // Second increment
+        let result2 = client.call_tool(CallToolRequestParam {
+            name: "increment".into(),
+            arguments: None,
+        }).await.unwrap();
+
+        assert_eq!(extract_number(&result2), 2);
+    }
+
+    fn extract_number(result: &CallToolResult) -> i32 {
+        if let Some(Content::Text(text)) = result.content.first() {
+            text.text.parse().unwrap()
+        } else {
+            panic!("Expected number in text content")
+        }
+    }
+    ```
+  </Tab>
+
+  <Tab title="Error Handling">
+    ```rust
+    #[tokio::test]
+    async fn test_tool_validation() {
+        let (client, _handle) = spawn_test_server(MyServer::new()).await;
+
+        // Call with invalid input
+        let result = client.call_tool(CallToolRequestParam {
+            name: "divide".into(),
+            arguments: Some(serde_json::json!({
+                "a": 10,
+                "b": 0  // Division by zero
+            }).as_object().cloned().unwrap()),
+        }).await.unwrap();
+
+        // Tool should return error
+        assert_eq!(result.is_error, Some(true));
+
+        // Verify error message
+        if let Some(Content::Text(text)) = result.content.first() {
+            assert!(text.text.contains("division by zero"));
+        }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+### Testing Server Capabilities
+
+```rust
+#[tokio::test]
+async fn test_server_info() {
+    let (client, _handle) = spawn_test_server(MyServer::new()).await;
+
+    let info = client.get_server_info().await.unwrap();
+
+    assert_eq!(info.server_info.name, "my-server");
+    assert_eq!(info.server_info.version, "1.0.0");
+    assert!(info.capabilities.tools.is_some());
+}
+
+#[tokio::test]
+async fn test_list_tools() {
+    let (client, _handle) = spawn_test_server(MyServer::new()).await;
+
+    let result = client.list_tools(Default::default()).await.unwrap();
+
+    assert_eq!(result.tools.len(), 3);
+
+    let tool_names: Vec<_> = result.tools.iter()
+        .map(|t| t.name.as_str())
+        .collect();
+
+    assert!(tool_names.contains(&"echo"));
+    assert!(tool_names.contains(&"add"));
+    assert!(tool_names.contains(&"get_time"));
+}
+```
+
+### Testing with Middleware
+
+```rust
+use vulcan::{
+    ports::MiddlewareChain,
+    adapters::{LoggingMiddleware, MetricsMiddleware},
+};
+use std::sync::Arc;
+
+#[tokio::test]
+async fn test_with_middleware() {
+    let metrics = MetricsMiddleware::new();
+
+    let mut chain = MiddlewareChain::new();
+    chain.add(Arc::new(LoggingMiddleware::new()));
+    chain.add(Arc::new(metrics.clone()));
+
+    // Create server with middleware
+    let server = MyServer::new_with_middleware(chain);
+    let (client, _handle) = spawn_test_server(server).await;
+
+    // Call tool
+    client.call_tool(CallToolRequestParam {
+        name: "echo".into(),
+        arguments: None,
+    }).await.unwrap();
+
+    // Verify middleware tracked the call
+    assert_eq!(metrics.invocation_count(), 1);
+}
+```
+
+## Testing Clients
+
+### Testing Client Connections
+
+```rust
+#[tokio::test]
+async fn test_client_connects_to_server() {
+    // Start a real server
+    let server = MyServer::new();
+    let (client_transport, server_transport) = duplex();
+
+    tokio::spawn(async move {
+        server.serve(server_transport).await.ok();
+    });
+
+    // Create client
+    let client = ().serve(client_transport).await;
+
+    assert!(client.is_ok(), "Client should connect successfully");
+}
+```
+
+### Testing Client Operations
+
+```rust
+#[tokio::test]
+async fn test_client_calls_tool() {
+    let (client, _handle) = spawn_test_server(MyServer::new()).await;
+
+    let result = client.call_tool(CallToolRequestParam {
+        name: "add".into(),
+        arguments: Some(serde_json::json!({
+            "a": 5,
+            "b": 3
+        }).as_object().cloned().unwrap()),
+    }).await;
+
+    assert!(result.is_ok());
+    let result = result.unwrap();
+    assert_eq!(result.is_error, Some(false));
+}
+```
+
+### Testing Custom ClientHandler
+
+```rust
+#[tokio::test]
+async fn test_custom_client_handler() {
+    let client = MyCustomClient::new();
+    let (client_transport, server_transport) = duplex();
+
+    tokio::spawn(async move {
+        MyServer::new().serve(server_transport).await.ok();
+    });
+
+    let service = client.serve(client_transport).await.unwrap();
+
+    let info = service.get_client_info();
+    assert_eq!(info.client_info.name, "my-custom-client");
+    assert_eq!(info.client_info.version, "1.0.0");
+}
+```
+
+## Property-Based Testing
+
+Test with randomized inputs to find edge cases:
+
+```rust
+use proptest::prelude::*;
+
+proptest! {
+    #[test]
+    fn test_add_tool_with_random_inputs(a in -1000i32..1000, b in -1000i32..1000) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime.block_on(async {
+            let (client, _handle) = spawn_test_server(Calculator::new()).await;
+
+            let result = client.call_tool(CallToolRequestParam {
+                name: "add".into(),
+                arguments: Some(serde_json::json!({
+                    "a": a,
+                    "b": b
+                }).as_object().cloned().unwrap()),
+            }).await.unwrap();
+
+            assert_eq!(result.is_error, Some(false));
+
+            // Verify the result
+            if let Some(Content::Text(text)) = result.content.first() {
+                let sum: i32 = text.text.parse().unwrap();
+                assert_eq!(sum, a + b);
+            }
+        });
+    }
+}
+```
+
+<Note>
+Property-based testing requires adding `proptest` to your dev-dependencies:
+
+```toml
+[dev-dependencies]
+proptest = "1"
+```
+</Note>
+
+## Integration Testing
+
+### Testing Against External Servers
+
+Test your client against a real external server:
+
+```rust
+use vulcan::transport::TokioChildProcess;
+use tokio::process::Command;
+
+#[tokio::test]
+#[ignore]  // Skip in CI, run with: cargo test -- --ignored
+async fn test_against_python_server() {
+    // Start Python MCP server
+    let transport = TokioChildProcess::new(
+        Command::new("python")
+            .arg("examples/python_server.py")
+    ).unwrap();
+
+    let client = ().serve(transport).await.unwrap();
+
+    // Test communication
+    let tools = client.list_tools(Default::default()).await.unwrap();
+    assert!(!tools.tools.is_empty());
+
+    let result = client.call_tool(CallToolRequestParam {
+        name: "hello".into(),
+        arguments: None,
+    }).await.unwrap();
+
+    assert_eq!(result.is_error, Some(false));
+}
+```
+
+### Testing with HTTP Transport
+
+```rust
+use vulcan::transport::SseClient;
+
+#[tokio::test]
+#[ignore]  // Requires running server
+async fn test_http_transport() {
+    // Assumes server running at localhost:8080
+    let transport = SseClient::new("http://localhost:8080/sse").unwrap();
+
+    let client = ().serve(transport).await.unwrap();
+
+    let result = client.call_tool(CallToolRequestParam {
+        name: "ping".into(),
+        arguments: None,
+    }).await.unwrap();
+
+    assert_eq!(result.is_error, Some(false));
+}
+```
+
+## Benchmarking
+
+### Basic Benchmark
+
+```rust
+#[cfg(test)]
+mod benches {
+    use super::*;
+    use std::time::Instant;
+
+    #[tokio::test]
+    async fn bench_tool_execution() {
+        let (client, _handle) = spawn_test_server(MyServer::new()).await;
+
+        let start = Instant::now();
+        let iterations = 1000;
+
+        for _ in 0..iterations {
+            client.call_tool(CallToolRequestParam {
+                name: "echo".into(),
+                arguments: None,
+            }).await.unwrap();
+        }
+
+        let duration = start.elapsed();
+        let avg = duration / iterations;
+
+        println!("Average tool call: {:?}", avg);
+        assert!(avg.as_millis() < 10, "Tool calls should be fast");
+    }
+}
+```
+
+### Using Criterion
+
+For more sophisticated benchmarks, use `criterion`:
+
+```rust
+// benches/tool_benchmarks.rs
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use vulcan::transport::duplex;
+
+fn benchmark_tool_call(c: &mut Criterion) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    c.bench_function("tool_call", |b| {
+        b.to_async(&runtime).iter(|| async {
+            let (client, _handle) = spawn_test_server(MyServer::new()).await;
+
+            client.call_tool(black_box(CallToolRequestParam {
+                name: "echo".into(),
+                arguments: None,
+            })).await.unwrap()
+        });
+    });
+}
+
+criterion_group!(benches, benchmark_tool_call);
+criterion_main!(benches);
+```
+
+## Code Coverage
+
+### Generate Coverage Report
+
+```bash
+# Install cargo-llvm-cov
+cargo install cargo-llvm-cov
+rustup component add llvm-tools-preview
+
+# Generate coverage
+cargo llvm-cov --lcov --output-path target/coverage.lcov
+
+# Generate HTML report
+cargo llvm-cov --html
+```
+
+### VSCode Integration
+
+Add to `.vscode/settings.json`:
+
+```json
+{
+    "coverage-gutters.coverageFileNames": ["coverage.lcov"],
+    "coverage-gutters.coverageBaseDir": "target"
+}
+```
+
+Install the **Coverage Gutters** extension and click "Watch" in the status bar.
+
+## Common Testing Patterns
+
+### Setup and Teardown
+
+```rust
+struct TestContext {
+    client: Box<dyn ServiceExt>,
+    _handle: tokio::task::JoinHandle<()>,
+}
+
+impl TestContext {
+    async fn setup() -> Self {
+        let (client, handle) = spawn_test_server(MyServer::new()).await;
+        Self {
+            client: Box::new(client),
+            _handle: handle,
+        }
+    }
+
+    async fn call_tool(&self, name: &str) -> CallToolResult {
+        self.client.call_tool(CallToolRequestParam {
+            name: name.into(),
+            arguments: None,
+        }).await.unwrap()
+    }
+}
+
+#[tokio::test]
+async fn test_with_context() {
+    let ctx = TestContext::setup().await;
+
+    let result = ctx.call_tool("echo").await;
+    assert_eq!(result.is_error, Some(false));
+}
+```
+
+### Parameterized Tests
+
+```rust
+#[tokio::test]
+async fn test_arithmetic_operations() {
+    let (client, _handle) = spawn_test_server(Calculator::new()).await;
+
+    let test_cases = vec![
+        ("add", 5, 3, 8),
+        ("subtract", 10, 4, 6),
+        ("multiply", 7, 6, 42),
+        ("divide", 20, 5, 4),
+    ];
+
+    for (operation, a, b, expected) in test_cases {
+        let result = client.call_tool(CallToolRequestParam {
+            name: operation.into(),
+            arguments: Some(serde_json::json!({
+                "a": a,
+                "b": b
+            }).as_object().cloned().unwrap()),
+        }).await.unwrap();
+
+        if let Some(Content::Text(text)) = result.content.first() {
+            let value: i32 = text.text.parse().unwrap();
+            assert_eq!(value, expected, "Failed for {} {} {}", operation, a, b);
+        }
+    }
+}
+```
+
+### Testing Timeouts
+
+```rust
+use tokio::time::{timeout, Duration};
+
+#[tokio::test]
+async fn test_slow_tool_timeout() {
+    let (client, _handle) = spawn_test_server(MyServer::new()).await;
+
+    let result = timeout(
+        Duration::from_millis(100),
+        client.call_tool(CallToolRequestParam {
+            name: "very_slow_operation".into(),
+            arguments: None,
+        })
+    ).await;
+
+    assert!(result.is_err(), "Should timeout");
+}
+```
+
+## Testing Best Practices
+
+<AccordionGroup>
+  <Accordion title="Test One Thing at a Time">
+    Each test should verify a single behavior:
+
+    ```rust
+    // ✅ Good - focused test
+    #[tokio::test]
+    async fn test_tool_returns_correct_value() {
+        let (client, _handle) = spawn_test_server(Calculator::new()).await;
+
+        let result = client.call_tool(...).await.unwrap();
+
+        assert_eq!(extract_number(&result), 42);
+    }
+
+    // ❌ Bad - testing too many things
+    #[tokio::test]
+    async fn test_calculator() {
+        // Tests 10 different operations in one test
+        // Hard to debug when it fails
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Use Descriptive Test Names">
+    Test names should describe what they verify:
+
+    ```rust
+    // ✅ Good - clear intent
+    #[tokio::test]
+    async fn test_divide_by_zero_returns_error() { }
+
+    #[tokio::test]
+    async fn test_counter_increments_from_zero_to_one() { }
+
+    // ❌ Bad - unclear purpose
+    #[tokio::test]
+    async fn test1() { }
+
+    #[tokio::test]
+    async fn test_calculator() { }
+    ```
+  </Accordion>
+
+  <Accordion title="Test Error Cases">
+    Don't just test the happy path:
+
+    ```rust
+    #[tokio::test]
+    async fn test_invalid_input_returns_error() {
+        let (client, _handle) = spawn_test_server(MyServer::new()).await;
+
+        let result = client.call_tool(CallToolRequestParam {
+            name: "create_user".into(),
+            arguments: Some(serde_json::json!({
+                "name": "",  // Invalid: empty name
+                "age": -5    // Invalid: negative age
+            }).as_object().cloned().unwrap()),
+        }).await.unwrap();
+
+        assert_eq!(result.is_error, Some(true));
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Clean Up Resources">
+    Ensure tests don't leak resources:
+
+    ```rust
+    #[tokio::test]
+    async fn test_with_cleanup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let server = MyServer::with_db(&db_path).await.unwrap();
+        let (client, handle) = spawn_test_server(server).await;
+
+        // Test operations
+        client.call_tool(...).await.unwrap();
+
+        // Cleanup
+        handle.abort();
+        drop(temp_dir);  // Auto-deletes on drop
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Continuous Integration
+
+### GitHub Actions Example
+
+```yaml
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Run tests
+        run: cargo test --all-features
+
+      - name: Generate coverage
+        run: |
+          cargo install cargo-llvm-cov
+          cargo llvm-cov --lcov --output-path coverage.lcov
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: coverage.lcov
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Building a Server" icon="server" href="/guides/building-server">
+    Build servers to test
+  </Card>
+  <Card title="Building a Client" icon="laptop-code" href="/guides/building-client">
+    Build clients to test
+  </Card>
+  <Card title="Error Handling" icon="triangle-exclamation" href="/guides/error-handling">
+    Test error scenarios
+  </Card>
+  <Card title="Deployment" icon="rocket" href="/guides/deployment">
+    Deploy tested applications
+  </Card>
+</CardGroup>

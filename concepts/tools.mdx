@@ -1,0 +1,525 @@
+---
+title: Tools
+description: 'Create AI-callable functions with zero boilerplate'
+---
+
+# Tools
+
+**Tools** are the core feature of MCP servers. They allow AI assistants like Claude to perform actions in your domain by calling functions you define.
+
+## What is a Tool?
+
+A **tool** is a function that:
+- Has a **name** (e.g., `"calculate"`, `"search_database"`)
+- Has a **description** (tells AI what it does)
+- Accepts **typed parameters** (validated via JSON schema)
+- Returns a **result** (success data or error)
+- Can be **asynchronous** (uses `async`/`await`)
+
+## Creating Tools
+
+### The `#[tool]` Macro
+
+The easiest way to create tools is with the `#[tool]` macro:
+
+```rust
+use vulcan::{tool, ErrorData};
+
+#[tool(description = "Add two numbers")]
+async fn add(&self, a: i32, b: i32) -> Result<i32, ErrorData> {
+    Ok(a + b)
+}
+```
+
+That's it! The macro automatically:
+- ✅ Generates JSON schema from parameter types
+- ✅ Handles serialization/deserialization
+- ✅ Wraps return value in `CallToolResult`
+- ✅ Registers the tool in the router
+
+### Tool Attributes
+
+Configure tools with attributes:
+
+```rust
+#[tool(
+    name = "custom_name",           // Override function name
+    description = "Tool description", // Required - tells AI what it does
+)]
+async fn my_tool(&self, param: String) -> Result<Data, ErrorData> {
+    // ...
+}
+```
+
+<ParamField path="name" type="string">
+  Override the tool name. By default, uses the function name.
+
+  ```rust
+  #[tool(name = "db_search", description = "Search database")]
+  async fn search(&self, query: String) -> Result<Vec<Result>, ErrorData> {
+      // Tool will be called "db_search", not "search"
+  }
+  ```
+</ParamField>
+
+<ParamField path="description" type="string" required>
+  Description shown to AI assistants. Should clearly explain:
+  - What the tool does
+  - What it returns
+  - Any side effects
+
+  ```rust
+  #[tool(description = "Search the product database for items matching the query. Returns up to 10 results.")]
+  async fn search_products(&self, query: String) -> Result<Vec<Product>, ErrorData> {
+      // ...
+  }
+  ```
+</ParamField>
+
+## Parameters
+
+### Direct Parameters (No Wrappers!)
+
+**Vulcan Phase 5 eliminates parameter wrappers.** Just use your types directly:
+
+```rust
+#[tool(description = "Create user")]
+async fn create_user(
+    &self,
+    name: String,
+    email: String,
+    age: Option<i32>, // Optional parameter!
+) -> Result<User, ErrorData> {
+    let age = age.unwrap_or(18); // Optional with default
+    Ok(User { name, email, age })
+}
+```
+
+### Parameter Types
+
+Any type that implements `Deserialize` + `JsonSchema` can be a parameter:
+
+**Primitives:**
+```rust
+#[tool(description = "Example")]
+async fn example(
+    &self,
+    text: String,
+    count: i32,
+    ratio: f64,
+    enabled: bool,
+) -> Result<(), ErrorData> {
+    // ...
+}
+```
+
+**Optional Parameters:**
+```rust
+#[tool(description = "Search with optional filters")]
+async fn search(
+    &self,
+    query: String,
+    limit: Option<i32>,    // Optional - detected from Option<T>
+    offset: Option<i32>,   // Optional
+) -> Result<Vec<Result>, ErrorData> {
+    let limit = limit.unwrap_or(10);
+    let offset = offset.unwrap_or(0);
+    // ...
+}
+```
+
+**Complex Types:**
+```rust
+use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
+
+#[derive(Deserialize, JsonSchema)]
+struct SearchQuery {
+    text: String,
+    filters: Vec<String>,
+    case_sensitive: bool,
+}
+
+#[tool(description = "Advanced search")]
+async fn advanced_search(
+    &self,
+    query: SearchQuery, // Complex parameter
+) -> Result<Vec<Result>, ErrorData> {
+    // Access fields: query.text, query.filters, query.case_sensitive
+    // ...
+}
+```
+
+## Return Values
+
+### Auto-Serialization
+
+Return any type that implements `Serialize` + `JsonSchema`:
+
+```rust
+#[derive(Serialize, JsonSchema)]
+struct CalculationResult {
+    result: i32,
+    operation: String,
+}
+
+#[tool(description = "Calculate")]
+async fn calculate(&self, a: i32, b: i32) -> Result<CalculationResult, ErrorData> {
+    Ok(CalculationResult {
+        result: a + b,
+        operation: "add".to_string(),
+    })
+}
+```
+
+Vulcan automatically wraps the result in `CallToolResult` with proper content encoding.
+
+### Error Handling
+
+Return `ErrorData` for failures:
+
+```rust
+#[tool(description = "Divide numbers")]
+async fn divide(&self, a: i32, b: i32) -> Result<f64, ErrorData> {
+    if b == 0 {
+        return Err(ErrorData::invalid_input("Cannot divide by zero"));
+    }
+    Ok(a as f64 / b as f64)
+}
+```
+
+**ErrorData constructors:**
+- `ErrorData::internal(e)` - Internal server error
+- `ErrorData::invalid_input(msg)` - Invalid parameters/input
+- `ErrorData::not_found(msg)` - Resource not found
+
+Any error type implementing `Into<ErrorData>` can be used with `.await?`:
+
+```rust
+#[tool(description = "Fetch data")]
+async fn fetch_data(&self, url: String) -> Result<Data, ErrorData> {
+    let response = reqwest::get(&url).await?; // ✅ Auto-converts
+    let data = response.json().await?;        // ✅ Auto-converts
+    Ok(data)
+}
+```
+
+## Tool Router
+
+### The `#[tool_router]` Macro
+
+Group tools together with `#[tool_router]`:
+
+```rust
+use vulcan::{tool, tool_router};
+use vulcan::handler::server::tool::ToolRouter;
+
+#[derive(Clone)]
+struct Calculator {
+    tool_router: ToolRouter<Self>,
+}
+
+#[tool_router]
+impl Calculator {
+    fn new() -> Self {
+        Self {
+            tool_router: Self::tool_router(), // Generated by macro
+        }
+    }
+
+    #[tool(description = "Add two numbers")]
+    async fn add(&self, a: i32, b: i32) -> Result<i32, ErrorData> {
+        Ok(a + b)
+    }
+
+    #[tool(description = "Subtract two numbers")]
+    async fn subtract(&self, a: i32, b: i32) -> Result<i32, ErrorData> {
+        Ok(a - b)
+    }
+
+    #[tool(description = "Multiply two numbers")]
+    async fn multiply(&self, a: i32, b: i32) -> Result<i32, ErrorData> {
+        Ok(a * b)
+    }
+}
+```
+
+The `#[tool_router]` macro generates:
+- `Self::tool_router()` function - creates a configured router
+- Tool registration for all `#[tool]` methods
+- Parameter parsing and validation logic
+
+### Server Handler Integration
+
+Use `#[tool_handler]` to auto-implement `ServerHandler`:
+
+```rust
+use vulcan::{tool_handler, ServerHandler, model::*};
+
+#[tool_handler]
+impl ServerHandler for Calculator {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+            ..Default::default()
+        }
+    }
+}
+```
+
+The `#[tool_handler]` macro auto-implements:
+- `list_tools()` - returns all registered tools
+- `call_tool()` - dispatches to the correct method
+
+You only need to implement `get_info()`!
+
+## Advanced Patterns
+
+### Stateful Tools
+
+Tools can access mutable state:
+
+```rust
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+#[derive(Clone)]
+struct Counter {
+    count: Arc<Mutex<i32>>,
+    tool_router: ToolRouter<Self>,
+}
+
+#[tool_router]
+impl Counter {
+    #[tool(description = "Increment counter")]
+    async fn increment(&self) -> Result<i32, ErrorData> {
+        let mut count = self.count.lock().await;
+        *count += 1;
+        Ok(*count)
+    }
+}
+```
+
+### Context Extractors
+
+Access request context with extractors:
+
+```rust
+use vulcan::service::RequestContext;
+use vulcan::RoleServer;
+
+#[tool(description = "Get correlation ID")]
+async fn get_correlation_id(
+    &self,
+    context: RequestContext<RoleServer>, // Injected by framework
+) -> Result<String, ErrorData> {
+    Ok(context.correlation_id.to_string())
+}
+```
+
+Available extractors:
+- `RequestContext<RoleServer>` - Full request context
+- `Extension<T>` - Custom extensions
+- `ToolName` - Current tool name
+- `Peer` - Client peer information
+
+### Async Tool Logic
+
+Tools can perform complex async operations:
+
+```rust
+#[tool(description = "Process batch")]
+async fn process_batch(&self, items: Vec<String>) -> Result<Vec<ProcessedItem>, ErrorData> {
+    // Parallel processing
+    let tasks: Vec<_> = items.into_iter()
+        .map(|item| tokio::spawn(async move {
+            process_item(item).await
+        }))
+        .collect();
+
+    // Wait for all
+    let mut results = vec![];
+    for task in tasks {
+        results.push(task.await??);
+    }
+
+    Ok(results)
+}
+```
+
+### Error Recovery
+
+Use middleware for automatic retry:
+
+```rust
+use vulcan::adapters::RetryMiddleware;
+
+let retry = Arc::new(RetryMiddleware::new(3)); // Retry up to 3 times
+chain.add(retry);
+```
+
+Tools that fail will be automatically retried according to middleware configuration.
+
+## Tool Lifecycle
+
+When a tool is called, this happens:
+
+1. **Request arrives** via transport (stdio, HTTP, etc.)
+2. **Middleware chain: `before_execute`** (logging, metrics, validation)
+3. **Parameter deserialization** (JSON → Rust types)
+4. **Parameter validation** (JSON schema validation)
+5. **Tool execution** (your async function runs)
+6. **Result serialization** (Rust types → JSON)
+7. **Middleware chain: `after_execute`** or `on_error`
+8. **Response sent** via transport
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Write clear descriptions">
+    Tool descriptions should:
+    - Explain what the tool does in 1-2 sentences
+    - Mention important parameters
+    - Note side effects (writes to DB, sends email, etc.)
+    - Describe return value
+
+    ```rust
+    #[tool(description = "Search the product database for items matching the query. \
+                          Returns up to 10 results sorted by relevance. \
+                          This operation is read-only and does not modify data.")]
+    async fn search_products(&self, query: String) -> Result<Vec<Product>, ErrorData> {
+        // ...
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Use typed parameters">
+    Avoid `serde_json::Value` for parameters. Use concrete types for:
+    - Better error messages
+    - Compile-time validation
+    - Auto-generated schemas
+    - IDE autocomplete
+
+    ```rust
+    // ❌ Avoid
+    #[tool(description = "Create user")]
+    async fn create_user(&self, params: serde_json::Value) -> Result<User, ErrorData> {
+        let name = params.get("name")?.as_str()?; // Runtime errors
+        // ...
+    }
+
+    // ✅ Prefer
+    #[derive(Deserialize, JsonSchema)]
+    struct CreateUserParams {
+        name: String,
+        email: String,
+    }
+
+    #[tool(description = "Create user")]
+    async fn create_user(&self, params: CreateUserParams) -> Result<User, ErrorData> {
+        // Compile-time safety!
+        // ...
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Handle errors gracefully">
+    Return descriptive errors to help AI assistants understand failures:
+
+    ```rust
+    #[tool(description = "Get user by ID")]
+    async fn get_user(&self, id: i64) -> Result<User, ErrorData> {
+        self.db.get_user(id).await
+            .ok_or_else(|| ErrorData::not_found(format!("User {} not found", id)))
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Keep tools focused">
+    Each tool should do **one thing well**. Split complex operations into multiple tools:
+
+    ```rust
+    // ❌ Avoid - too many responsibilities
+    #[tool(description = "User operations")]
+    async fn user_ops(&self, action: String, ...) -> Result<(), ErrorData> {
+        match action.as_str() {
+            "create" => { /* ... */ },
+            "update" => { /* ... */ },
+            "delete" => { /* ... */ },
+            _ => Err(ErrorData::invalid_input("Unknown action")),
+        }
+    }
+
+    // ✅ Prefer - focused tools
+    #[tool(description = "Create user")]
+    async fn create_user(&self, ...) -> Result<User, ErrorData> { /* ... */ }
+
+    #[tool(description = "Update user")]
+    async fn update_user(&self, ...) -> Result<User, ErrorData> { /* ... */ }
+
+    #[tool(description = "Delete user")]
+    async fn delete_user(&self, ...) -> Result<(), ErrorData> { /* ... */ }
+    ```
+  </Accordion>
+
+  <Accordion title="Use middleware for cross-cutting concerns">
+    Don't add logging, metrics, or retry logic to every tool. Use middleware:
+
+    ```rust
+    use vulcan::adapters::*;
+
+    let mut chain = MiddlewareChain::new();
+    chain.add(Arc::new(LoggingMiddleware::new()));
+    chain.add(Arc::new(MetricsMiddleware::new()));
+    chain.add(Arc::new(RetryMiddleware::new(3)));
+
+    // Now ALL tools get logging, metrics, and retry automatically!
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Testing Tools
+
+Test tools using integration tests with real transports:
+
+```rust
+#[tokio::test]
+async fn test_calculator_add() {
+    let server = Calculator::new();
+
+    // Create test service
+    let (client, _handle) = spawn_test_service(server).await;
+
+    // Call tool
+    let result = client.call_tool(CallToolRequestParam {
+        name: "add".into(),
+        arguments: Some(serde_json::json!({
+            "a": 5,
+            "b": 3
+        }).as_object().cloned().unwrap()),
+    }).await.unwrap();
+
+    // Verify result
+    assert!(result.is_error.is_none());
+    assert_eq!(result.content[0].text, "8");
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Resources" icon="database" href="/concepts/resources">
+    Learn about exposing data sources
+  </Card>
+  <Card title="Middleware" icon="layer-group" href="/concepts/middleware">
+    Add logging, metrics, and retry
+  </Card>
+  <Card title="Building a Server" icon="server" href="/guides/building-server">
+    Complete server building guide
+  </Card>
+  <Card title="Examples" icon="code" href="/examples/counter-server">
+    See a complete counter server example
+  </Card>
+</CardGroup>

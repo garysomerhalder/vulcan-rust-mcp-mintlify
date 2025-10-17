@@ -1,0 +1,353 @@
+---
+title: Installation
+description: 'Add Vulcan to your Rust project'
+---
+
+# Installation
+
+Learn how to install Vulcan and configure feature flags for your use case.
+
+## Requirements
+
+- **Rust**: 1.75 or later ([install rustup](https://rustup.rs))
+- **Tokio**: Async runtime (Vulcan uses `tokio` for all async operations)
+
+## Adding Vulcan
+
+Add Vulcan to your `Cargo.toml`:
+
+```toml
+[dependencies]
+vulcan = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+<Warning>
+The version shown above is a placeholder. Check [crates.io/crates/vulcan](https://crates.io/crates/vulcan) for the latest version.
+</Warning>
+
+## Feature Flags
+
+Vulcan uses **feature flags** to minimize compile times and binary sizes. Enable only the features you need.
+
+### Core Features
+
+<ParamField path="server" type="feature" default="disabled">
+  Enable MCP server functionality. Required for building MCP servers.
+
+  ```toml
+  vulcan = { version = "0.1", features = ["server"] }
+  ```
+</ParamField>
+
+<ParamField path="client" type="feature" default="disabled">
+  Enable MCP client functionality. Required for building MCP clients.
+
+  ```toml
+  vulcan = { version = "0.1", features = ["client"] }
+  ```
+</ParamField>
+
+<ParamField path="macros" type="feature" default="disabled">
+  Enable procedural macros (`#[tool]`, `#[tool_router]`, `#[resource]`, `#[prompt]`).
+
+  ```toml
+  vulcan = { version = "0.1", features = ["macros"] }
+  ```
+</ParamField>
+
+### Transport Features
+
+Transports handle communication between client and server. Enable the transport(s) you need.
+
+<ParamField path="transport-io" type="feature" default="disabled">
+  **Stdio transport** - Most common for Claude Desktop integration.
+
+  ```toml
+  vulcan = { version = "0.1", features = ["transport-io"] }
+  ```
+
+  Provides `vulcan::transport::stdio()` for stdin/stdout communication.
+</ParamField>
+
+<ParamField path="transport-child-process" type="feature" default="disabled">
+  **Child process transport** - Launch MCP servers as child processes.
+
+  ```toml
+  vulcan = { version = "0.1", features = ["transport-child-process"] }
+  ```
+
+  Provides `vulcan::transport::TokioChildProcess` for spawning servers.
+</ParamField>
+
+<ParamField path="transport-sse-server" type="feature" default="disabled">
+  **Server-Sent Events (SSE) server transport** - HTTP-based streaming.
+
+  ```toml
+  vulcan = { version = "0.1", features = ["transport-sse-server"] }
+  ```
+
+  Provides `vulcan::transport::SseServer` for SSE-based servers.
+</ParamField>
+
+<ParamField path="transport-sse-client" type="feature" default="disabled">
+  **Server-Sent Events (SSE) client transport** - Connect to SSE servers.
+
+  ```toml
+  vulcan = { version = "0.1", features = ["transport-sse-client"] }
+  ```
+
+  Provides `vulcan::transport::SseClientTransport` for connecting to SSE servers.
+</ParamField>
+
+<ParamField path="transport-streamable-http-server" type="feature" default="disabled">
+  **Streamable HTTP server transport** - HTTP with streaming support.
+
+  ```toml
+  vulcan = { version = "0.1", features = ["transport-streamable-http-server"] }
+  ```
+
+  Provides `vulcan::transport::StreamableHttpService` for HTTP servers.
+</ParamField>
+
+<ParamField path="transport-streamable-http-client" type="feature" default="disabled">
+  **Streamable HTTP client transport** - Connect to HTTP servers.
+
+  ```toml
+  vulcan = { version = "0.1", features = ["transport-streamable-http-client"] }
+  ```
+
+  Provides `vulcan::transport::StreamableHttpClientTransport`.
+</ParamField>
+
+<ParamField path="transport-async-rw" type="feature" default="disabled">
+  **AsyncRead/AsyncWrite transport** - Build transports from byte streams.
+
+  ```toml
+  vulcan = { version = "0.1", features = ["transport-async-rw"] }
+  ```
+
+  Provides `vulcan::transport::AsyncRwTransport` for custom transports.
+</ParamField>
+
+<ParamField path="transport-worker" type="feature" default="disabled">
+  **Worker transport** - Run workers in separate tokio tasks.
+
+  ```toml
+  vulcan = { version = "0.1", features = ["transport-worker"] }
+  ```
+
+  Provides `vulcan::transport::WorkerTransport` for background task processing.
+</ParamField>
+
+### Additional Features
+
+<ParamField path="auth" type="feature" default="disabled">
+  Enable OAuth and authentication support.
+
+  ```toml
+  vulcan = { version = "0.1", features = ["auth"] }
+  ```
+
+  See the [OAuth Support](/guides/oauth) guide for details.
+</ParamField>
+
+## Common Feature Combinations
+
+### For Building MCP Servers
+
+Most MCP servers use this combination:
+
+```toml
+[dependencies]
+vulcan = { version = "0.1", features = ["server", "macros", "transport-io"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+schemars = "0.8"
+```
+
+This enables:
+- Server functionality (`server`)
+- Zero-boilerplate macros (`macros`)
+- Stdio transport for Claude Desktop (`transport-io`)
+
+### For Building MCP Clients
+
+```toml
+[dependencies]
+vulcan = { version = "0.1", features = ["client", "transport-child-process"] }
+tokio = { version = "1", features = ["full"] }
+```
+
+This enables:
+- Client functionality (`client`)
+- Ability to spawn servers as child processes (`transport-child-process`)
+
+### For HTTP-Based Servers
+
+```toml
+[dependencies]
+vulcan = { version = "0.1", features = [
+    "server",
+    "macros",
+    "transport-streamable-http-server"
+] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+schemars = "0.8"
+```
+
+### For Servers with OAuth
+
+```toml
+[dependencies]
+vulcan = { version = "0.1", features = [
+    "server",
+    "macros",
+    "transport-io",
+    "auth"
+] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+schemars = "0.8"
+```
+
+## Dependencies Explained
+
+### Required Dependencies
+
+<ParamField path="tokio" type="crate" required>
+  Async runtime. Vulcan is built on tokio and requires the `full` feature set.
+
+  ```toml
+  tokio = { version = "1", features = ["full"] }
+  ```
+</ParamField>
+
+### Recommended Dependencies
+
+<ParamField path="serde" type="crate">
+  Serialization/deserialization. Required for structured tool parameters and return values.
+
+  ```toml
+  serde = { version = "1", features = ["derive"] }
+  ```
+</ParamField>
+
+<ParamField path="schemars" type="crate">
+  JSON schema generation. Required for tool parameter validation.
+
+  ```toml
+  schemars = "0.8"
+  ```
+</ParamField>
+
+### Optional Dependencies
+
+<ParamField path="tracing" type="crate">
+  Structured logging and diagnostics.
+
+  ```toml
+  tracing = "0.1"
+  tracing-subscriber = "0.3"
+  ```
+
+  Use with `vulcan::adapters::TracingMiddleware` for request/response logging.
+</ParamField>
+
+<ParamField path="anyhow" type="crate">
+  Ergonomic error handling.
+
+  ```toml
+  anyhow = "1"
+  ```
+
+  Vulcan's `ErrorData` has `From<anyhow::Error>` implementation.
+</ParamField>
+
+## Verifying Installation
+
+Create a minimal server to verify your installation:
+
+```rust
+use vulcan::{ServerHandler, model::*};
+
+#[derive(Clone)]
+struct MinimalServer;
+
+impl ServerHandler for MinimalServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::default()
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use vulcan::service::ServiceExt;
+    MinimalServer.serve((tokio::io::stdin(), tokio::io::stdout())).await?;
+    Ok(())
+}
+```
+
+Build and run:
+
+```bash
+cargo build
+cargo run
+```
+
+If it compiles and runs without errors, you're ready to go!
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Feature not enabled errors">
+    If you see errors like `unresolved import vulcan::transport::stdio`, make sure you've enabled the corresponding feature flag:
+
+    ```toml
+    vulcan = { version = "0.1", features = ["transport-io"] }
+    ```
+  </Accordion>
+
+  <Accordion title="Async runtime errors">
+    Vulcan requires tokio. If you see `there is no reactor running`, add `#[tokio::main]` to your main function:
+
+    ```rust
+    #[tokio::main]
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
+        // ...
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Macro errors">
+    Make sure you've enabled the `macros` feature:
+
+    ```toml
+    vulcan = { version = "0.1", features = ["macros"] }
+    ```
+
+    And import the macros:
+
+    ```rust
+    use vulcan::{tool, tool_router, tool_handler};
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first MCP server in 5 minutes
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/concepts/overview">
+    Learn about tools, resources, and transports
+  </Card>
+  <Card title="Guides" icon="map" href="/guides/building-server">
+    In-depth server and client building guides
+  </Card>
+  <Card title="Examples" icon="code" href="/examples/overview">
+    Browse complete example implementations
+  </Card>
+</CardGroup>

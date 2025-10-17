@@ -1,0 +1,615 @@
+---
+title: Transports
+description: 'Choose the right communication layer for your MCP server'
+---
+
+# Transports
+
+**Transports** handle communication between MCP clients and servers. Vulcan supports multiple transport types for different use cases.
+
+## What is a Transport?
+
+A transport is responsible for:
+- **Sending** messages from client to server (or server to client)
+- **Receiving** messages
+- **Encoding** messages as JSON-RPC over a wire protocol
+- **Managing** connection lifecycle
+
+## Available Transports
+
+### Stdio Transport
+
+**Standard input/output** - the most common transport for Claude Desktop.
+
+```rust
+use tokio::io::{stdin, stdout};
+
+// Server listens on stdin/stdout
+server.serve((stdin(), stdout())).await?;
+```
+
+**Use cases:**
+- Claude Desktop integration
+- Terminal-based tools
+- Unix pipeline integration
+
+**Features:**
+- ✅ Zero configuration
+- ✅ Works everywhere
+- ✅ Process isolation
+- ❌ Single client only
+- ❌ No network access
+
+**Enable with:**
+```toml
+vulcan = { version = "0.1", features = ["transport-io"] }
+```
+
+### Child Process Transport
+
+**Spawn MCP servers as child processes** - useful for clients.
+
+```rust
+use vulcan::transport::{TokioChildProcess, ConfigureCommandExt};
+use tokio::process::Command;
+
+let transport = TokioChildProcess::new(
+    Command::new("./my-mcp-server")
+)?;
+
+let service = ().serve(transport).await?;
+```
+
+**Use cases:**
+- Client applications
+- Testing servers locally
+- Multi-server orchestration
+
+**Features:**
+- ✅ Easy process management
+- ✅ Automatic cleanup
+- ✅ Stderr capture for debugging
+- ❌ Local only (no remote)
+
+**Enable with:**
+```toml
+vulcan = { version = "0.1", features = ["transport-child-process"] }
+```
+
+### SSE (Server-Sent Events) Transport
+
+**HTTP-based streaming** - for web applications.
+
+**Server:**
+```rust
+use vulcan::transport::SseServer;
+
+let sse_server = SseServer::new(server);
+// Integrate with axum/warp/actix-web
+```
+
+**Client:**
+```rust
+use vulcan::transport::SseClientTransport;
+
+let transport = SseClientTransport::new("http://localhost:8080/mcp");
+let service = ().serve(transport).await?;
+```
+
+**Use cases:**
+- Web-based MCP servers
+- Browser clients
+- Cloud deployments
+
+**Features:**
+- ✅ HTTP-based (firewall friendly)
+- ✅ Multiple concurrent clients
+- ✅ Works in browsers
+- ❌ Unidirectional (server → client only for events)
+
+**Enable with:**
+```toml
+# Server
+vulcan = { version = "0.1", features = ["transport-sse-server"] }
+
+# Client
+vulcan = { version = "0.1", features = ["transport-sse-client"] }
+```
+
+### Streamable HTTP Transport
+
+**Bidirectional HTTP streaming** - full-duplex communication.
+
+**Server:**
+```rust
+use vulcan::transport::{StreamableHttpService, StreamableHttpServerConfig};
+
+let config = StreamableHttpServerConfig::default();
+let http_service = StreamableHttpService::new(server, config);
+
+// Use with tower/axum
+```
+
+**Client:**
+```rust
+use vulcan::transport::StreamableHttpClientTransport;
+
+let transport = StreamableHttpClientTransport::new("http://localhost:8080");
+let service = ().serve(transport).await?;
+```
+
+**Use cases:**
+- Production HTTP deployments
+- Load-balanced servers
+- Cloud-native applications
+
+**Features:**
+- ✅ Full-duplex streaming
+- ✅ HTTP/2 support
+- ✅ Multiple concurrent clients
+- ✅ Works with load balancers
+- ❌ More complex setup
+
+**Enable with:**
+```toml
+# Server
+vulcan = { version = "0.1", features = ["transport-streamable-http-server"] }
+
+# Client
+vulcan = { version = "0.1", features = ["transport-streamable-http-client"] }
+```
+
+### AsyncRead/AsyncWrite Transport
+
+**Build custom transports** from byte streams.
+
+```rust
+use vulcan::transport::AsyncRwTransport;
+use tokio::net::TcpStream;
+
+// TCP transport
+let stream = TcpStream::connect("127.0.0.1:8080").await?;
+let transport = AsyncRwTransport::new(stream);
+
+let service = ().serve(transport).await?;
+```
+
+**Use cases:**
+- Custom protocols
+- TCP servers
+- Unix domain sockets
+- Named pipes
+
+**Features:**
+- ✅ Maximum flexibility
+- ✅ Any byte stream works
+- ✅ Full control
+- ❌ Manual protocol implementation
+
+**Enable with:**
+```toml
+vulcan = { version = "0.1", features = ["transport-async-rw"] }
+```
+
+### Worker Transport
+
+**Background task processing** - run workers in separate tokio tasks.
+
+```rust
+use vulcan::transport::WorkerTransport;
+
+let worker = MyWorker::new();
+let transport = WorkerTransport::new(worker);
+
+let service = ().serve(transport).await?;
+```
+
+**Use cases:**
+- Task queues
+- Background processing
+- Internal service communication
+
+**Features:**
+- ✅ Asynchronous execution
+- ✅ Isolated task context
+- ✅ Concurrent processing
+- ❌ In-process only
+
+**Enable with:**
+```toml
+vulcan = { version = "0.1", features = ["transport-worker"] }
+```
+
+## Choosing a Transport
+
+<CardGroup cols={2}>
+  <Card title="Claude Desktop Integration" icon="desktop">
+    **Use: Stdio**
+
+    Claude Desktop expects stdio communication. This is the simplest and most common use case.
+
+    ```toml
+    features = ["transport-io"]
+    ```
+  </Card>
+
+  <Card title="Web Application" icon="globe">
+    **Use: SSE or Streamable HTTP**
+
+    For browser-based clients or cloud deployments, use HTTP-based transports.
+
+    ```toml
+    features = ["transport-sse-server"]
+    ```
+  </Card>
+
+  <Card title="Testing Locally" icon="vial">
+    **Use: Child Process**
+
+    When testing or building MCP clients, spawn servers as child processes.
+
+    ```toml
+    features = ["transport-child-process"]
+    ```
+  </Card>
+
+  <Card title="Custom Protocol" icon="code">
+    **Use: AsyncRead/AsyncWrite**
+
+    For TCP, Unix sockets, or custom protocols, build from byte streams.
+
+    ```toml
+    features = ["transport-async-rw"]
+    ```
+  </Card>
+</CardGroup>
+
+## Transport Trait
+
+All transports implement the `Transport` trait:
+
+```rust
+pub trait Transport<R>: Send
+where
+    R: ServiceRole,
+{
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Send a message to the transport
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<R>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
+
+    /// Receive a message from the transport
+    fn receive(&mut self) -> impl Future<Output = Option<RxJsonRpcMessage<R>>> + Send;
+
+    /// Close the transport
+    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+}
+```
+
+This abstraction allows Vulcan to work with any transport implementation.
+
+## Custom Transports
+
+You can build custom transports by implementing the `Transport` trait.
+
+### Example: TCP Transport
+
+```rust
+use vulcan::transport::Transport;
+use vulcan::service::{ServiceRole, TxJsonRpcMessage, RxJsonRpcMessage};
+use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+pub struct TcpTransport {
+    stream: TcpStream,
+}
+
+impl<R: ServiceRole> Transport<R> for TcpTransport {
+    type Error = std::io::Error;
+
+    async fn send(&mut self, item: TxJsonRpcMessage<R>) -> Result<(), Self::Error> {
+        let json = serde_json::to_vec(&item)?;
+        self.stream.write_all(&json).await?;
+        self.stream.write_all(b"\n").await?; // Newline delimiter
+        Ok(())
+    }
+
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<R>> {
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+
+        loop {
+            match self.stream.read(&mut byte).await {
+                Ok(0) => return None, // EOF
+                Ok(_) => {
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                    buf.push(byte[0]);
+                }
+                Err(_) => return None,
+            }
+        }
+
+        serde_json::from_slice(&buf).ok()
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        self.stream.shutdown().await
+    }
+}
+```
+
+Then use it:
+
+```rust
+let stream = TcpStream::connect("127.0.0.1:8080").await?;
+let transport = TcpTransport { stream };
+
+server.serve(transport).await?;
+```
+
+## Transport Patterns
+
+### Reconnection
+
+Handle disconnections gracefully:
+
+```rust
+loop {
+    match TcpStream::connect("127.0.0.1:8080").await {
+        Ok(stream) => {
+            let transport = TcpTransport { stream };
+            if let Err(e) = server.serve(transport).await {
+                eprintln!("Connection error: {}, reconnecting...", e);
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to connect: {}, retrying in 5s...", e);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+}
+```
+
+### Multiplexing
+
+Serve multiple transports concurrently:
+
+```rust
+use tokio::net::TcpListener;
+
+let listener = TcpListener::bind("127.0.0.1:8080").await?;
+
+loop {
+    let (stream, addr) = listener.accept().await?;
+    let server = server.clone(); // Clone server for each connection
+
+    tokio::spawn(async move {
+        println!("New connection from: {}", addr);
+        let transport = TcpTransport { stream };
+        if let Err(e) = server.serve(transport).await {
+            eprintln!("Connection {} error: {}", addr, e);
+        }
+    });
+}
+```
+
+### Protocol Negotiation
+
+Support multiple transports on different ports:
+
+```rust
+use tokio::select;
+
+tokio::spawn(async move {
+    // Stdio transport
+    server.clone().serve((stdin(), stdout())).await
+});
+
+tokio::spawn(async move {
+    // HTTP transport
+    let http_service = StreamableHttpService::new(server.clone(), config);
+    axum::Server::bind(&"0.0.0.0:8080".parse()?)
+        .serve(http_service.into_make_service())
+        .await
+});
+
+tokio::spawn(async move {
+    // SSE transport
+    let sse_server = SseServer::new(server.clone());
+    // ...
+});
+
+// All transports running concurrently!
+```
+
+## Transport Configuration
+
+### Stdio Configuration
+
+No configuration needed:
+
+```rust
+use tokio::io::{stdin, stdout};
+server.serve((stdin(), stdout())).await?;
+```
+
+### HTTP Configuration
+
+Configure timeouts, headers, and more:
+
+```rust
+use vulcan::transport::StreamableHttpServerConfig;
+use std::time::Duration;
+
+let config = StreamableHttpServerConfig {
+    read_timeout: Duration::from_secs(30),
+    write_timeout: Duration::from_secs(30),
+    max_message_size: 1024 * 1024, // 1MB
+    ..Default::default()
+};
+
+let http_service = StreamableHttpService::new(server, config);
+```
+
+### SSE Configuration
+
+Configure event stream settings:
+
+```rust
+use vulcan::transport::SseServerConfig;
+
+let config = SseServerConfig {
+    heartbeat_interval: Duration::from_secs(30),
+    max_clients: 100,
+    ..Default::default()
+};
+
+let sse_server = SseServer::new(server, config);
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use stdio for Claude Desktop">
+    Claude Desktop expects stdio communication. Don't use HTTP or SSE for desktop integration.
+
+    ```rust
+    // ✅ Correct for Claude Desktop
+    server.serve((tokio::io::stdin(), tokio::io::stdout())).await?;
+
+    // ❌ Wrong for Claude Desktop
+    server.serve(HttpTransport::new()).await?;
+    ```
+  </Accordion>
+
+  <Accordion title="Handle disconnections">
+    Network transports should gracefully handle disconnections:
+
+    ```rust
+    loop {
+        match connect_and_serve().await {
+            Ok(_) => break,
+            Err(e) => {
+                eprintln!("Connection failed: {}, retrying...", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Use feature flags">
+    Only enable transports you need to minimize dependencies:
+
+    ```toml
+    # ✅ Good - only stdio
+    vulcan = { version = "0.1", features = ["transport-io"] }
+
+    # ❌ Bad - unnecessary dependencies
+    vulcan = { version = "0.1", features = [
+        "transport-io",
+        "transport-sse-server",
+        "transport-sse-client",
+        "transport-streamable-http-server",
+        "transport-streamable-http-client",
+        "transport-async-rw",
+        "transport-worker",
+    ] }
+    ```
+  </Accordion>
+
+  <Accordion title="Test with real transports">
+    Integration tests should use real transports, not mocks:
+
+    ```rust
+    #[tokio::test]
+    async fn test_with_stdio_transport() {
+        // Create a real stdio transport for testing
+        let (client_read, server_write) = tokio::io::duplex(1024);
+        let (server_read, client_write) = tokio::io::duplex(1024);
+
+        // Server uses server_read/server_write
+        let server_transport = (server_read, server_write);
+
+        // Client uses client_read/client_write
+        let client_transport = (client_read, client_write);
+
+        // Real integration test!
+        tokio::spawn(async move {
+            server.serve(server_transport).await
+        });
+
+        let client = ().serve(client_transport).await?;
+        let result = client.call_tool(...).await?;
+        assert!(result.is_ok());
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Performance
+
+Transport overhead varies by type:
+
+| Transport | Latency | Throughput | Overhead |
+|-----------|---------|------------|----------|
+| Stdio | ~50μs | ~20MB/s | Minimal |
+| TCP (local) | ~100μs | ~100MB/s | Low |
+| HTTP/1.1 | ~500μs | ~50MB/s | Medium |
+| HTTP/2 | ~300μs | ~80MB/s | Low |
+| SSE | ~1ms | ~30MB/s | Medium |
+
+See `benches/transport_*.rs` for detailed benchmarks.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Stdio hangs or blocks">
+    Make sure you're using tokio's async stdio, not std::io:
+
+    ```rust
+    // ❌ Wrong - blocks
+    use std::io::{stdin, stdout};
+
+    // ✅ Correct - async
+    use tokio::io::{stdin, stdout};
+    ```
+  </Accordion>
+
+  <Accordion title="HTTP transport connection refused">
+    Check that:
+    - Server is listening on the correct port
+    - Firewall allows connections
+    - URL matches server address
+  </Accordion>
+
+  <Accordion title="Feature not enabled errors">
+    Make sure you've enabled the transport feature:
+
+    ```toml
+    vulcan = { version = "0.1", features = ["transport-io"] }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Building a Server" icon="server" href="/guides/building-server">
+    Learn how to use transports in servers
+  </Card>
+  <Card title="Building a Client" icon="laptop-code" href="/guides/building-client">
+    Learn how to use transports in clients
+  </Card>
+  <Card title="Deployment" icon="rocket" href="/guides/deployment">
+    Deploy servers with different transports
+  </Card>
+  <Card title="Testing" icon="vial" href="/guides/testing">
+    Test with real transports
+  </Card>
+</CardGroup>

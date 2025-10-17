@@ -1,80 +1,310 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: 'Build your first MCP server in 5 minutes'
 ---
 
-## Get started in three steps
+# Quickstart Guide
 
-Get your documentation site running locally and make your first customization.
+Build a complete MCP server with tools in **5 minutes**. This guide walks you through creating a simple counter server that can be used with Claude Desktop or any MCP client.
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+- Rust 1.75+ installed ([rustup.rs](https://rustup.rs))
+- Basic familiarity with async Rust (tokio)
 
-### Step 2: Deploy your changes
+## Step 1: Create a New Project
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+```bash
+cargo new my-mcp-server
+cd my-mcp-server
+```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+## Step 2: Add Dependencies
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+Add Vulcan to your `Cargo.toml`:
 
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+```toml Cargo.toml
+[dependencies]
+vulcan = { version = "0.1", features = ["server", "macros", "transport-io"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+schemars = "0.8"
+```
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+The `transport-io` feature enables stdio transport, which is required for Claude Desktop integration.
 </Note>
+
+## Step 3: Write Your Server
+
+Replace `src/main.rs` with this complete counter server:
+
+```rust src/main.rs
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use vulcan::{
+    tool, tool_router, tool_handler, ServerHandler,
+    model::*, ErrorData,
+    handler::server::tool::ToolRouter,
+};
+
+#[derive(Clone)]
+pub struct Counter {
+    counter: Arc<Mutex<i32>>,
+    tool_router: ToolRouter<Self>,
+}
+
+#[tool_router]
+impl Counter {
+    fn new() -> Self {
+        Self {
+            counter: Arc::new(Mutex::new(0)),
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    #[tool(description = "Increment the counter by 1 and return the new value")]
+    async fn increment(&self) -> Result<i32, ErrorData> {
+        let mut counter = self.counter.lock().await;
+        *counter += 1;
+        Ok(*counter)
+    }
+
+    #[tool(description = "Get the current counter value")]
+    async fn get_value(&self) -> Result<i32, ErrorData> {
+        let counter = self.counter.lock().await;
+        Ok(*counter)
+    }
+
+    #[tool(description = "Reset the counter to zero")]
+    async fn reset(&self) -> Result<i32, ErrorData> {
+        let mut counter = self.counter.lock().await;
+        *counter = 0;
+        Ok(*counter)
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for Counter {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+            server_info: Implementation {
+                name: "counter-server".to_string(),
+                title: Some("Counter MCP Server".to_string()),
+                version: "1.0.0".to_string(),
+                icons: None,
+                website_url: None,
+            },
+            instructions: Some(
+                "A simple counter server that can increment, get, and reset a counter value.".to_string()
+            ),
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use vulcan::service::ServiceExt;
+
+    let server = Counter::new();
+
+    // Serve over stdio (for Claude Desktop integration)
+    server.serve((tokio::io::stdin(), tokio::io::stdout())).await?;
+
+    Ok(())
+}
+```
+
+## Step 4: Build and Test
+
+Build your server:
+
+```bash
+cargo build --release
+```
+
+Test it locally with a simple client:
+
+```rust
+// Create a test client (in a separate file or example)
+use vulcan::{service::ServiceExt, transport::TokioChildProcess};
+use tokio::process::Command;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let service = ().serve(TokioChildProcess::new(
+        Command::new("./target/release/my-mcp-server")
+    )?).await?;
+
+    // List available tools
+    let tools = service.list_tools(Default::default()).await?;
+    println!("Available tools: {:#?}", tools);
+
+    // Call the increment tool
+    let result = service.call_tool(vulcan::model::CallToolRequestParam {
+        name: "increment".into(),
+        arguments: None,
+    }).await?;
+    println!("Result: {:#?}", result);
+
+    service.cancel().await?;
+    Ok(())
+}
+```
+
+## Step 5: Integrate with Claude Desktop
+
+Add your server to Claude Desktop's configuration:
+
+<CodeGroup>
+
+```json macOS: ~/Library/Application Support/Claude/claude_desktop_config.json
+{
+  "mcpServers": {
+    "counter": {
+      "command": "/absolute/path/to/my-mcp-server/target/release/my-mcp-server"
+    }
+  }
+}
+```
+
+```json Windows: %APPDATA%\Claude\claude_desktop_config.json
+{
+  "mcpServers": {
+    "counter": {
+      "command": "C:\\absolute\\path\\to\\my-mcp-server\\target\\release\\my-mcp-server.exe"
+    }
+  }
+}
+```
+
+```json Linux: ~/.config/Claude/claude_desktop_config.json
+{
+  "mcpServers": {
+    "counter": {
+      "command": "/absolute/path/to/my-mcp-server/target/release/my-mcp-server"
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+Restart Claude Desktop, and your counter tools will be available!
+
+## Understanding the Code
+
+Let's break down what each part does:
+
+### 1. The `#[tool_router]` Macro
+
+```rust
+#[tool_router]
+impl Counter {
+    // Generates tool routing and registration logic
+}
+```
+
+This macro automatically:
+- Generates a `tool_router()` function that creates a `ToolRouter<Self>`
+- Registers all `#[tool]` methods
+- Handles parameter parsing and validation
+
+### 2. The `#[tool]` Macro
+
+```rust
+#[tool(description = "Increment the counter by 1")]
+async fn increment(&self) -> Result<i32, ErrorData> {
+    // Tool implementation
+}
+```
+
+This macro automatically:
+- Generates JSON schema from parameter types
+- Handles serialization/deserialization
+- Wraps return values in `CallToolResult`
+- Detects optional parameters from `Option<T>`
+
+### 3. The `#[tool_handler]` Macro
+
+```rust
+#[tool_handler]
+impl ServerHandler for Counter {
+    // Auto-implements list_tools and call_tool!
+}
+```
+
+This macro automatically:
+- Implements `list_tools()` using the `ToolRouter`
+- Implements `call_tool()` to dispatch to the right method
+- You only need to implement `get_info()`!
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Add Parameters" icon="sliders" href="/guides/building-server#parameters">
+    Learn how to add parameters to your tools
+  </Card>
+  <Card title="Error Handling" icon="triangle-exclamation" href="/guides/error-handling">
+    Handle errors gracefully with ErrorData
+  </Card>
+  <Card title="Add Resources" icon="database" href="/concepts/resources">
+    Expose data sources to AI assistants
+  </Card>
+  <Card title="Add Middleware" icon="layer-group" href="/concepts/middleware">
+    Add logging, metrics, and retry logic
+  </Card>
+</CardGroup>
+
+## Common Issues
+
+<AccordionGroup>
+  <Accordion title="Tool functions must be async">
+    All `#[tool]` functions must be `async fn`. Even if your implementation is synchronous, mark it as `async`:
+
+    ```rust
+    // ❌ Wrong
+    #[tool(description = "Add")]
+    fn add(&self, a: i32, b: i32) -> Result<i32, ErrorData> { }
+
+    // ✅ Correct
+    #[tool(description = "Add")]
+    async fn add(&self, a: i32, b: i32) -> Result<i32, ErrorData> { }
+    ```
+  </Accordion>
+
+  <Accordion title="Claude Desktop doesn't see my server">
+    Make sure:
+    - You've restarted Claude Desktop after editing the config
+    - The path to your binary is absolute, not relative
+    - Your binary has execute permissions (Linux/macOS: `chmod +x`)
+    - Check Claude Desktop's logs for errors
+  </Accordion>
+
+  <Accordion title="Serialization errors">
+    Make sure your return types implement `Serialize` and `JsonSchema`:
+
+    ```rust
+    use serde::{Serialize, Deserialize};
+    use schemars::JsonSchema;
+
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct MyResult {
+        value: i32,
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## What You've Learned
+
+- ✅ Created an MCP server with Vulcan
+- ✅ Defined tools using the `#[tool]` macro
+- ✅ Integrated with Claude Desktop
+- ✅ Understood the core macros: `#[tool_router]`, `#[tool]`, `#[tool_handler]`
+
+Ready to build more complex servers? Check out the [Core Concepts](/concepts/overview) guide!

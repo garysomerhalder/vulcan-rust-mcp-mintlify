@@ -1,0 +1,359 @@
+---
+title: Ports & Adapters Example
+description: 'Hexagonal architecture with Vulcan - Domain, Ports, and Adapters'
+---
+
+# Ports & Adapters Example
+
+Learn how Vulcan implements hexagonal architecture (ports and adapters) for clean separation of concerns.
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────┐
+│                  ADAPTERS                        │
+│  (Infrastructure - How things work)              │
+│                                                  │
+│  LoggingMiddleware  MetricsMiddleware           │
+│  TracingEventPublisher  InMemoryToolRepository  │
+└─────────────┬────────────────────────┬───────────┘
+              │                        │
+              ▼                        ▼
+┌─────────────────────────────────────────────────┐
+│                    PORTS                         │
+│  (Interfaces - What we need)                    │
+│                                                  │
+│  Middleware  EventPublisher  ToolRepository     │
+└─────────────┬────────────────────────┬───────────┘
+              │                        │
+              ▼                        ▼
+┌─────────────────────────────────────────────────┐
+│                   DOMAIN                         │
+│  (Business Logic - What we do)                  │
+│                                                  │
+│  Tool  DomainEvent  ToolName  ErrorData         │
+└──────────────────────────────────────────────────┘
+```
+
+## Complete Example
+
+```rust src/main.rs
+use vulcan::{
+    domain::{Tool, DomainEvent},
+    ports::{MiddlewareChain, EventPublisher, ToolRepository},
+    adapters::{
+        LoggingMiddleware,
+        TracingMiddleware,
+        TracingEventPublisher,
+        InMemoryToolRepository,
+    },
+};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Part 1: Tool Repository (Port + Adapter)
+    let mut repository = InMemoryToolRepository::new();
+
+    let calculator = Tool::new(
+        "calculator".to_string(),
+        "Performs arithmetic".to_string(),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "operation": { "type": "string" },
+                "a": { "type": "number" },
+                "b": { "type": "number" }
+            }
+        })
+    )?;
+
+    repository.register(calculator.clone()).await?;
+    println!("✅ Registered tools: {}", repository.count().await);
+
+    // Part 2: Middleware Chain
+    let mut chain = MiddlewareChain::new();
+    chain.add(Arc::new(LoggingMiddleware::new()));
+    chain.add(Arc::new(TracingMiddleware::new()));
+
+    // Part 3: Event Publisher
+    let publisher = TracingEventPublisher::new();
+
+    publisher.publish(DomainEvent::ToolInvoked {
+        name: "calculator".to_string(),
+        timestamp: chrono::Utc::now(),
+    }).await?;
+
+    println!("✅ Hexagonal architecture in action!");
+
+    Ok(())
+}
+```
+
+## Layer Breakdown
+
+### Domain Layer (Inner)
+
+Pure business logic with no infrastructure dependencies:
+
+```rust
+// Domain entities
+pub struct Tool {
+    name: ToolName,
+    description: String,
+    input_schema: serde_json::Value,
+}
+
+// Domain events
+pub enum DomainEvent {
+    ToolInvoked { name: String, timestamp: DateTime<Utc> },
+    ToolCompleted { name: String, duration: Duration },
+    ResourceAccessed { uri: String, timestamp: DateTime<Utc> },
+}
+```
+
+**Key principle:** Domain never imports infrastructure code.
+
+### Ports Layer (Boundary)
+
+Trait definitions - "what" the domain needs:
+
+```rust
+// Middleware port
+#[async_trait]
+pub trait Middleware: Send + Sync {
+    async fn before_execute(&self, tool: &Tool, ...) -> Result<(), ErrorData>;
+    async fn after_execute(&self, tool: &Tool, ...) -> Result<(), ErrorData>;
+    async fn on_error(&self, tool: &Tool, ...) -> Result<(), ErrorData>;
+}
+
+// Event publisher port
+#[async_trait]
+pub trait EventPublisher: Send + Sync {
+    async fn publish(&self, event: DomainEvent) -> Result<(), ErrorData>;
+}
+
+// Tool repository port
+#[async_trait]
+pub trait ToolRepository: Send + Sync {
+    async fn register(&mut self, tool: Tool) -> Result<(), ErrorData>;
+    async fn get(&self, name: &str) -> Result<Option<Tool>, ErrorData>;
+    async fn list(&self) -> Result<Vec<Tool>, ErrorData>;
+}
+```
+
+**Key principle:** Ports define contracts, not implementations.
+
+### Adapters Layer (Outer)
+
+Concrete implementations - "how" infrastructure works:
+
+```rust
+// Logging adapter
+pub struct LoggingMiddleware {
+    prefix: String,
+}
+
+#[async_trait]
+impl Middleware for LoggingMiddleware {
+    async fn before_execute(&self, tool: &Tool, ...) -> Result<(), ErrorData> {
+        println!("[{}] Executing: {}", self.prefix, tool.name());
+        Ok(())
+    }
+    // ...
+}
+
+// Event publisher adapter
+pub struct TracingEventPublisher;
+
+#[async_trait]
+impl EventPublisher for TracingEventPublisher {
+    async fn publish(&self, event: DomainEvent) -> Result<(), ErrorData> {
+        tracing::info!(?event, "Domain event published");
+        Ok(())
+    }
+}
+
+// Repository adapter
+pub struct InMemoryToolRepository {
+    tools: HashMap<String, Tool>,
+}
+
+#[async_trait]
+impl ToolRepository for InMemoryToolRepository {
+    async fn register(&mut self, tool: Tool) -> Result<(), ErrorData> {
+        self.tools.insert(tool.name().to_string(), tool);
+        Ok(())
+    }
+    // ...
+}
+```
+
+**Key principle:** Adapters implement ports, can be swapped.
+
+## Benefits
+
+<CardGroup cols={2}>
+  <Card title="Testability" icon="vial">
+    Mock adapters for fast unit tests
+  </Card>
+  <Card title="Flexibility" icon="arrows-rotate">
+    Swap implementations without changing domain
+  </Card>
+  <Card title="Maintainability" icon="screwdriver-wrench">
+    Clear separation of concerns
+  </Card>
+  <Card title="Independence" icon="cube">
+    Domain has no infrastructure dependencies
+  </Card>
+</CardGroup>
+
+## Practical Example: Swap Adapters
+
+### Development: In-Memory
+
+```rust
+// Fast, no external dependencies
+let repository = InMemoryToolRepository::new();
+```
+
+### Production: Database
+
+```rust
+pub struct PostgresToolRepository {
+    pool: sqlx::PgPool,
+}
+
+#[async_trait]
+impl ToolRepository for PostgresToolRepository {
+    async fn register(&mut self, tool: Tool) -> Result<(), ErrorData> {
+        sqlx::query("INSERT INTO tools (...) VALUES (...)")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+    // ...
+}
+
+// Same interface, different implementation!
+let repository = PostgresToolRepository::new(pool);
+```
+
+### Testing: Mock
+
+```rust
+pub struct MockToolRepository {
+    tools: Vec<Tool>,
+    register_called: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl ToolRepository for MockToolRepository {
+    async fn register(&mut self, tool: Tool) -> Result<(), ErrorData> {
+        *self.register_called.lock().await += 1;
+        self.tools.push(tool);
+        Ok(())
+    }
+    // ...
+}
+
+// Verify behavior in tests
+let mock = MockToolRepository::new();
+assert_eq!(*mock.register_called.lock().await, 1);
+```
+
+## Custom Adapters
+
+Create your own adapters for domain-specific needs:
+
+```rust
+// Custom event publisher: Send to external service
+pub struct WebhookEventPublisher {
+    url: String,
+    client: reqwest::Client,
+}
+
+#[async_trait]
+impl EventPublisher for WebhookEventPublisher {
+    async fn publish(&self, event: DomainEvent) -> Result<(), ErrorData> {
+        let payload = serde_json::to_string(&event)?;
+
+        self.client
+            .post(&self.url)
+            .json(&payload)
+            .send()
+            .await?;
+
+        Ok(())
+    }
+}
+
+// Use it
+let publisher = WebhookEventPublisher {
+    url: "https://api.example.com/events".to_string(),
+    client: reqwest::Client::new(),
+};
+```
+
+## Key Takeaways
+
+<AccordionGroup>
+  <Accordion title="Dependency Rule">
+    Dependencies point inward:
+
+    ```
+    Adapters → Ports → Domain
+    ```
+
+    Domain never depends on outer layers!
+  </Accordion>
+
+  <Accordion title="Ports Are Contracts">
+    Ports define "what", adapters define "how":
+
+    ```rust
+    // Port (trait): What we need
+    trait EventPublisher {
+        async fn publish(&self, event: DomainEvent);
+    }
+
+    // Adapter (impl): How we do it
+    struct TracingEventPublisher;
+    impl EventPublisher for TracingEventPublisher { ... }
+    ```
+  </Accordion>
+
+  <Accordion title="Swap Adapters Easily">
+    Change infrastructure without changing domain:
+
+    ```rust
+    // Development
+    let repo = InMemoryToolRepository::new();
+
+    // Production
+    let repo = PostgresToolRepository::new(pool);
+
+    // Testing
+    let repo = MockToolRepository::new();
+
+    // All implement the same ToolRepository port!
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture Guide" icon="sitemap" href="/architecture/overview">
+    Deep-dive into DDD + Hexagonal
+  </Card>
+  <Card title="Domain Layer" icon="cube" href="/architecture/domain-layer">
+    Understand domain entities
+  </Card>
+  <Card title="Middleware" icon="layer-group" href="/examples-docs/middleware">
+    Build custom middleware
+  </Card>
+  <Card title="Testing" icon="vial" href="/guides/testing">
+    Test with mock adapters
+  </Card>
+</CardGroup>

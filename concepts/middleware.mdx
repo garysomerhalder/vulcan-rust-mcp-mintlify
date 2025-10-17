@@ -1,0 +1,545 @@
+---
+title: Middleware
+description: 'Add logging, metrics, retry, and timeout with zero boilerplate'
+---
+
+# Middleware
+
+**Middleware** provides cross-cutting concerns like logging, metrics, retry, and timeout without modifying your tool code.
+
+## What is Middleware?
+
+Middleware is code that **wraps** tool execution, running:
+- **Before** the tool executes (`before_execute`)
+- **After** successful execution (`after_execute`)
+- **On error** (`on_error`)
+
+Think of it as an **onion** - each middleware layer wraps the next:
+
+```
+Request → Logging → Metrics → Retry → Timeout → **Your Tool** → Timeout → Retry → Metrics → Logging → Response
+```
+
+## Built-in Middleware
+
+Vulcan provides 5 production-ready middleware adapters:
+
+### LoggingMiddleware
+
+Logs tool calls with parameters and results:
+
+```rust
+use vulcan::adapters::LoggingMiddleware;
+use std::sync::Arc;
+
+let logging = Arc::new(LoggingMiddleware::new());
+chain.add(logging);
+```
+
+**Output:**
+```
+[INFO] Tool 'calculate' called with params: {"a": 5, "b": 3}
+[INFO] Tool 'calculate' completed successfully with result: 8
+```
+
+### TracingMiddleware
+
+Structured tracing with spans and events:
+
+```rust
+use vulcan::adapters::TracingMiddleware;
+
+let tracing = Arc::new(TracingMiddleware::new());
+chain.add(tracing);
+```
+
+Integrates with `tracing` ecosystem:
+- OpenTelemetry export
+- Jaeger/Zipkin integration
+- Distributed tracing support
+
+### MetricsMiddleware
+
+Tracks execution metrics:
+
+```rust
+use vulcan::adapters::MetricsMiddleware;
+
+let metrics = Arc::new(MetricsMiddleware::new());
+chain.add(metrics);
+
+// Later, read metrics:
+let stats = metrics.get_metrics();
+println!("Total calls: {}", stats.total_calls);
+println!("Success rate: {:.2}%", stats.success_rate());
+```
+
+**Tracked metrics:**
+- Total calls per tool
+- Success/failure counts
+- Execution duration (avg, min, max)
+- Error rates
+
+### TimeoutMiddleware
+
+Enforces execution timeout:
+
+```rust
+use vulcan::adapters::TimeoutMiddleware;
+use std::time::Duration;
+
+let timeout = Arc::new(TimeoutMiddleware::new(Duration::from_secs(30)));
+chain.add(timeout);
+```
+
+If a tool takes longer than 30 seconds, it's cancelled and returns a timeout error.
+
+### RetryMiddleware
+
+Automatic retry on failure:
+
+```rust
+use vulcan::adapters::RetryMiddleware;
+
+let retry = Arc::new(RetryMiddleware::new(3)); // Retry up to 3 times
+chain.add(retry);
+```
+
+Failed tools are automatically retried with exponential backoff.
+
+## Using Middleware
+
+### Creating a Middleware Chain
+
+```rust
+use vulcan::ports::MiddlewareChain;
+use vulcan::adapters::*;
+use std::sync::Arc;
+use std::time::Duration;
+
+let mut chain = MiddlewareChain::new();
+
+// Add middleware in order (outermost first)
+chain.add(Arc::new(LoggingMiddleware::new()));
+chain.add(Arc::new(MetricsMiddleware::new()));
+chain.add(Arc::new(TimeoutMiddleware::new(Duration::from_secs(30))));
+chain.add(Arc::new(RetryMiddleware::new(3)));
+```
+
+<Note>
+Middleware order matters! Outer middleware runs first for `before_execute` and last for `after_execute`.
+
+Example: Logging → Metrics → Retry → Tool → Retry → Metrics → Logging
+</Note>
+
+### Applying Middleware
+
+Middleware is applied when executing tools:
+
+```rust
+use vulcan::ports::MiddlewareContext;
+
+let mut context = MiddlewareContext::new();
+
+// Before execution
+chain.before_execute(&tool, &params, &mut context).await?;
+
+// Execute tool
+let result = execute_tool(&tool, &params).await;
+
+match result {
+    Ok(value) => {
+        // After successful execution
+        chain.after_execute(&tool, &params, &value, &context).await?;
+    }
+    Err(error) => {
+        // On error
+        chain.on_error(&tool, &params, &error, &context).await?;
+    }
+}
+```
+
+<Tip>
+You don't need to do this manually! The `#[tool_handler]` macro automatically applies middleware chains when dispatching tool calls.
+</Tip>
+
+## Middleware Context
+
+The `MiddlewareContext` stores per-request state:
+
+```rust
+pub struct MiddlewareContext {
+    pub correlation_id: String,     // Unique request ID
+    pub metadata: HashMap<String, String>, // Custom data
+}
+```
+
+Middleware can **read and write** context data:
+
+```rust
+#[async_trait::async_trait]
+impl Middleware for MyMiddleware {
+    async fn before_execute(
+        &self,
+        tool: &Tool,
+        params: &serde_json::Value,
+        context: &mut MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        // Store data in context
+        context.metadata.insert(
+            "start_time".to_string(),
+            Instant::now().elapsed().as_millis().to_string()
+        );
+        Ok(())
+    }
+
+    async fn after_execute(
+        &self,
+        tool: &Tool,
+        params: &serde_json::Value,
+        result: &serde_json::Value,
+        context: &MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        // Read data from context
+        let start = context.metadata.get("start_time").unwrap();
+        let elapsed = Instant::now().elapsed().as_millis() - start.parse::<u128>().unwrap();
+        println!("Tool executed in {}ms", elapsed);
+        Ok(())
+    }
+}
+```
+
+## Creating Custom Middleware
+
+Implement the `Middleware` trait:
+
+```rust
+use vulcan::ports::Middleware;
+use vulcan::domain::Tool;
+use vulcan::ErrorData;
+use async_trait::async_trait;
+
+pub struct MyMiddleware {
+    // State
+}
+
+#[async_trait]
+impl Middleware for MyMiddleware {
+    async fn before_execute(
+        &self,
+        tool: &Tool,
+        params: &serde_json::Value,
+        context: &mut MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        // Run before tool executes
+        println!("About to call: {}", tool.name().as_str());
+        Ok(())
+    }
+
+    async fn after_execute(
+        &self,
+        tool: &Tool,
+        params: &serde_json::Value,
+        result: &serde_json::Value,
+        context: &MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        // Run after successful execution
+        println!("Tool {} succeeded", tool.name().as_str());
+        Ok(())
+    }
+
+    async fn on_error(
+        &self,
+        tool: &Tool,
+        params: &serde_json::Value,
+        error: &ErrorData,
+        context: &MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        // Run on error
+        println!("Tool {} failed: {}", tool.name().as_str(), error);
+        Ok(())
+    }
+}
+```
+
+Then use it:
+
+```rust
+let my_middleware = Arc::new(MyMiddleware { /* ... */ });
+chain.add(my_middleware);
+```
+
+## Advanced Patterns
+
+### Authentication Middleware
+
+Check authentication before tool execution:
+
+```rust
+pub struct AuthMiddleware {
+    api_keys: HashSet<String>,
+}
+
+#[async_trait]
+impl Middleware for AuthMiddleware {
+    async fn before_execute(
+        &self,
+        tool: &Tool,
+        params: &serde_json::Value,
+        context: &mut MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        let api_key = context.metadata.get("api_key")
+            .ok_or_else(|| ErrorData::invalid_input("Missing API key"))?;
+
+        if !self.api_keys.contains(api_key) {
+            return Err(ErrorData::invalid_input("Invalid API key"));
+        }
+
+        Ok(())
+    }
+
+    // ... other methods
+}
+```
+
+### Rate Limiting Middleware
+
+Limit calls per user:
+
+```rust
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+pub struct RateLimitMiddleware {
+    limits: Arc<Mutex<HashMap<String, RateLimiter>>>,
+    max_calls_per_minute: usize,
+}
+
+#[async_trait]
+impl Middleware for RateLimitMiddleware {
+    async fn before_execute(
+        &self,
+        tool: &Tool,
+        params: &serde_json::Value,
+        context: &mut MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        let user_id = context.metadata.get("user_id")
+            .ok_or_else(|| ErrorData::invalid_input("Missing user_id"))?;
+
+        let mut limits = self.limits.lock().await;
+        let limiter = limits.entry(user_id.clone())
+            .or_insert_with(|| RateLimiter::new(self.max_calls_per_minute));
+
+        if !limiter.allow() {
+            return Err(ErrorData::invalid_input("Rate limit exceeded"));
+        }
+
+        Ok(())
+    }
+
+    // ... other methods
+}
+```
+
+### Caching Middleware
+
+Cache tool results:
+
+```rust
+use std::collections::HashMap;
+
+pub struct CacheMiddleware {
+    cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
+    ttl: Duration,
+}
+
+#[async_trait]
+impl Middleware for CacheMiddleware {
+    async fn before_execute(
+        &self,
+        tool: &Tool,
+        params: &serde_json::Value,
+        context: &mut MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        let cache_key = format!("{}:{}", tool.name().as_str(), params);
+
+        let cache = self.cache.lock().await;
+        if let Some(entry) = cache.get(&cache_key) {
+            if entry.is_valid(self.ttl) {
+                // Store cached result in context
+                context.metadata.insert("cached_result".to_string(), entry.value.to_string());
+                context.metadata.insert("cache_hit".to_string(), "true".to_string());
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn after_execute(
+        &self,
+        tool: &Tool,
+        params: &serde_json::Value,
+        result: &serde_json::Value,
+        context: &MiddlewareContext,
+    ) -> Result<(), ErrorData> {
+        // Don't cache if we used a cached result
+        if context.metadata.get("cache_hit").is_some() {
+            return Ok(());
+        }
+
+        let cache_key = format!("{}:{}", tool.name().as_str(), params);
+        let mut cache = self.cache.lock().await;
+        cache.insert(cache_key, CacheEntry::new(result.clone()));
+
+        Ok(())
+    }
+
+    // ... on_error
+}
+```
+
+## Middleware Composition
+
+Combine multiple middleware for powerful behavior:
+
+```rust
+let mut chain = MiddlewareChain::new();
+
+// Layer 1: Authentication (must pass first)
+chain.add(Arc::new(AuthMiddleware::new(api_keys)));
+
+// Layer 2: Rate limiting (per authenticated user)
+chain.add(Arc::new(RateLimitMiddleware::new(100)));
+
+// Layer 3: Logging (log all authenticated requests)
+chain.add(Arc::new(LoggingMiddleware::new()));
+
+// Layer 4: Metrics (track performance)
+chain.add(Arc::new(MetricsMiddleware::new()));
+
+// Layer 5: Caching (avoid redundant work)
+chain.add(Arc::new(CacheMiddleware::new(Duration::from_secs(60))));
+
+// Layer 6: Timeout (enforce max duration)
+chain.add(Arc::new(TimeoutMiddleware::new(Duration::from_secs(30))));
+
+// Layer 7: Retry (handle transient failures)
+chain.add(Arc::new(RetryMiddleware::new(3)));
+```
+
+Execution flow:
+```
+Request
+  → Auth (reject unauthorized)
+  → Rate Limit (reject if exceeded)
+  → Logging (log request)
+  → Metrics (start timer)
+  → Cache (check for cached result)
+  → Timeout (enforce deadline)
+  → Retry (attempt up to 3 times)
+    → **Your Tool**
+  → Retry (on failure, retry)
+  → Timeout (check if timed out)
+  → Cache (store result)
+  → Metrics (record duration)
+  → Logging (log result)
+  → Rate Limit (update counter)
+  → Auth (validate response)
+Response
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Order middleware carefully">
+    Middleware runs in order for `before_execute` and reverse order for `after_execute`.
+
+    **Common patterns:**
+    1. **Auth first** - reject unauthorized requests early
+    2. **Logging early** - capture all requests (including rejected ones)
+    3. **Metrics before timeout** - measure full execution time
+    4. **Retry innermost** - retry the actual tool execution
+  </Accordion>
+
+  <Accordion title="Keep middleware focused">
+    Each middleware should do **one thing**. Don't create "mega middleware" that does logging + metrics + retry.
+
+    ```rust
+    // ❌ Bad - too many responsibilities
+    pub struct MegaMiddleware {
+        // logging + metrics + retry + timeout + auth
+    }
+
+    // ✅ Good - focused middleware
+    let mut chain = MiddlewareChain::new();
+    chain.add(Arc::new(AuthMiddleware::new()));
+    chain.add(Arc::new(LoggingMiddleware::new()));
+    chain.add(Arc::new(MetricsMiddleware::new()));
+    chain.add(Arc::new(RetryMiddleware::new(3)));
+    chain.add(Arc::new(TimeoutMiddleware::new(Duration::from_secs(30))));
+    ```
+  </Accordion>
+
+  <Accordion title="Use context for state">
+    Store per-request state in `MiddlewareContext.metadata`, not in middleware fields.
+
+    ```rust
+    // ❌ Bad - race conditions with concurrent requests
+    pub struct BadMiddleware {
+        start_time: Mutex<Option<Instant>>,
+    }
+
+    // ✅ Good - per-request state
+    async fn before_execute(&self, context: &mut MiddlewareContext) {
+        context.metadata.insert("start_time".to_string(), Instant::now().to_string());
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Handle errors gracefully">
+    Middleware should be **resilient**. Don't panic or fail the entire request for non-critical issues.
+
+    ```rust
+    async fn after_execute(&self, result: &Value, context: &Context) -> Result<(), ErrorData> {
+        // ❌ Bad - fails request if logging fails
+        self.logger.log(result)?;
+
+        // ✅ Good - log error but don't fail request
+        if let Err(e) = self.logger.log(result) {
+            eprintln!("Failed to log result: {}", e);
+        }
+
+        Ok(())
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Performance
+
+Middleware overhead is minimal:
+
+- **Empty chain**: ~1μs per request
+- **LoggingMiddleware**: ~5μs per request
+- **MetricsMiddleware**: ~3μs per request
+- **RetryMiddleware** (no retries): ~2μs per request
+- **TimeoutMiddleware**: ~8μs per request
+
+See `benches/middleware_chain.rs` for detailed benchmarks.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Custom Middleware Example" icon="code" href="/examples/custom-middleware">
+    Build your own middleware
+  </Card>
+  <Card title="Transports" icon="network-wired" href="/concepts/transports">
+    Learn about transports
+  </Card>
+  <Card title="Testing" icon="vial" href="/guides/testing">
+    Test middleware with integration tests
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture/middleware-system">
+    Deep dive into middleware architecture
+  </Card>
+</CardGroup>
